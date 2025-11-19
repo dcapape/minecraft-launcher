@@ -6,9 +6,12 @@ import time
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QPushButton, QLabel, QLineEdit, 
                              QTextEdit, QMessageBox, QProgressBar, QDialog, QDialogButtonBox,
-                             QComboBox)
+                             QComboBox, QMenu)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QUrl, QPoint
-from PyQt5.QtGui import QColor, QPainter, QPen, QBrush
+from PyQt5.QtGui import QColor, QPainter, QPen, QBrush, QPixmap
+import requests
+from io import BytesIO
+from typing import Optional
 from java_downloader import JavaDownloader
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 import webbrowser
@@ -17,6 +20,22 @@ import re
 from auth_manager import AuthManager
 from credential_storage import CredentialStorage
 from minecraft_launcher import MinecraftLauncher
+
+class LoadVersionsThread(QThread):
+    """Thread para cargar versiones de Minecraft sin bloquear la UI"""
+    finished = pyqtSignal(list)  # lista de versiones
+    error = pyqtSignal(str)
+    
+    def __init__(self, minecraft_launcher):
+        super().__init__()
+        self.minecraft_launcher = minecraft_launcher
+    
+    def run(self):
+        try:
+            versions = self.minecraft_launcher.get_available_versions(only_downloaded=True)
+            self.finished.emit(versions)
+        except Exception as e:
+            self.error.emit(str(e))
 
 class JavaDownloadThread(QThread):
     """Thread para descargar Java sin bloquear la UI"""
@@ -44,71 +63,6 @@ class JavaDownloadThread(QThread):
                 self.error.emit("No se pudo descargar Java")
         except Exception as e:
             self.error.emit(str(e))
-
-class JavaDownloadDialog(QDialog):
-    """Diálogo con barra de progreso para descargar Java"""
-    def __init__(self, java_version, minecraft_path, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle(f"Descargando Java {java_version}")
-        self.setModal(True)
-        self.java_path = None
-        
-        layout = QVBoxLayout()
-        
-        info_label = QLabel(f"Descargando Java {java_version} desde Adoptium...\nEsto puede tardar varios minutos.")
-        info_label.setWordWrap(True)
-        layout.addWidget(info_label)
-        
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        layout.addWidget(self.progress_bar)
-        
-        self.status_label = QLabel("Iniciando descarga...")
-        layout.addWidget(self.status_label)
-        
-        buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-        
-        self.setLayout(layout)
-        
-        # Iniciar descarga
-        from java_downloader import JavaDownloader
-        downloader = JavaDownloader(minecraft_path)
-        self.download_thread = JavaDownloadThread(downloader, java_version)
-        self.download_thread.progress.connect(self.on_progress)
-        self.download_thread.finished.connect(self.on_finished)
-        self.download_thread.error.connect(self.on_error)
-        self.download_thread.message.connect(self.on_message)
-        self.download_thread.start()
-    
-    def on_progress(self, downloaded, total):
-        if total > 0:
-            percent = int((downloaded / total) * 100)
-            self.progress_bar.setValue(percent)
-            mb_downloaded = downloaded / (1024 * 1024)
-            mb_total = total / (1024 * 1024)
-            self.status_label.setText(f"Descargado: {mb_downloaded:.1f} MB / {mb_total:.1f} MB ({percent}%)")
-        else:
-            self.progress_bar.setRange(0, 0)  # Modo indeterminado
-    
-    def on_finished(self, java_path):
-        self.java_path = java_path
-        self.status_label.setText("Descarga completada!")
-        self.progress_bar.setValue(100)
-        self.accept()
-    
-    def on_error(self, error_msg):
-        self.status_label.setText(f"Error: {error_msg}")
-        QMessageBox.critical(self, "Error", f"No se pudo descargar Java:\n{error_msg}")
-        self.reject()
-    
-    def on_message(self, message):
-        self.status_label.setText(message)
-    
-    def get_java_path(self):
-        return self.java_path
 
 class AuthThread(QThread):
     """Thread para realizar autenticación sin bloquear la UI"""
@@ -288,6 +242,8 @@ class LauncherWindow(QMainWindow):
         self.credential_storage = CredentialStorage()
         self.minecraft_launcher = MinecraftLauncher()
         self.auth_thread = None
+        self.load_versions_thread = None
+        self.java_download_thread = None
         self.old_pos = None  # Para arrastrar la ventana
         self.title_bar = None  # Referencia a la barra de título
         
@@ -295,7 +251,14 @@ class LauncherWindow(QMainWindow):
         self.load_last_selected_version()
         
         self.init_ui()
+        
+        # Inicializar widget de usuario
+        self.update_user_widget(None)
+        
         self.load_saved_credentials()
+        
+        # Cargar versiones después de mostrar la ventana
+        self.load_versions_async()
     
     def init_ui(self):
         """Inicializa la interfaz de usuario"""
@@ -492,6 +455,41 @@ class LauncherWindow(QMainWindow):
         title.setAlignment(Qt.AlignCenter)
         title_bar_layout.addWidget(title, 1)  # Stretch factor 1 para que ocupe el espacio
         
+        # Widget de usuario (arriba a la derecha)
+        self.user_widget = QWidget()
+        self.user_widget.setObjectName("userWidget")
+        user_widget_layout = QHBoxLayout()
+        user_widget_layout.setContentsMargins(0, 0, 0, 0)
+        user_widget_layout.setSpacing(5)
+        
+        self.user_avatar_label = QLabel()
+        self.user_avatar_label.setFixedSize(32, 32)
+        self.user_avatar_label.setScaledContents(True)
+        self.user_avatar_label.setVisible(False)
+        user_widget_layout.addWidget(self.user_avatar_label)
+        
+        self.user_name_label = QLabel("Iniciar sesión")
+        self.user_name_label.setObjectName("userNameLabel")
+        self.user_name_label.setStyleSheet("""
+            QLabel#userNameLabel {
+                color: #e9d5ff;
+                font-size: 12px;
+                padding: 5px 10px;
+                border-radius: 5px;
+                background: transparent;
+            }
+            QLabel#userNameLabel:hover {
+                background: rgba(139, 92, 246, 0.3);
+                cursor: pointer;
+            }
+        """)
+        self.user_name_label.setCursor(Qt.PointingHandCursor)
+        self.user_name_label.mousePressEvent = lambda e: self._on_user_widget_clicked()
+        user_widget_layout.addWidget(self.user_name_label)
+        
+        self.user_widget.setLayout(user_widget_layout)
+        title_bar_layout.addWidget(self.user_widget)
+        
         # Botones de ventana (más pequeños)
         minimize_btn = QPushButton("−")
         minimize_btn.setObjectName("minimizeButton")
@@ -505,30 +503,36 @@ class LauncherWindow(QMainWindow):
         
         layout.addWidget(self.title_bar)
         
-        # Información del usuario
-        self.user_label = QLabel("No autenticado")
-        self.user_label.setAlignment(Qt.AlignCenter)
-        self.user_label.setStyleSheet("font-size: 16px; font-weight: bold; margin: 10px;")
-        layout.addWidget(self.user_label)
-        
         # Barra de progreso
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
+        self.progress_label = QLabel("")  # Label para mostrar el estado de la descarga
+        self.progress_label.setAlignment(Qt.AlignCenter)
+        self.progress_label.setVisible(False)
         layout.addWidget(self.progress_bar)
+        layout.addWidget(self.progress_label)
         
         # Área de mensajes
         self.message_area = QTextEdit()
         self.message_area.setReadOnly(True)
-        self.message_area.setMaximumHeight(200)  # Reducir altura
+        self.message_area.setMaximumHeight(300)  
         layout.addWidget(self.message_area)
         
         # Selector de versión de Minecraft
         version_layout = QHBoxLayout()
+        version_layout.setSpacing(5)  # Espaciado entre elementos
+        version_layout.setAlignment(Qt.AlignVCenter)  # Alinear verticalmente al centro
         version_label = QLabel("Versión Minecraft:")
+        version_label.setFixedHeight(40)  # Misma altura que combo y botón
+        version_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)  # Alinear texto verticalmente
+        version_label.setStyleSheet("font-size: 14px;")  # Mismo tamaño de fuente
         version_layout.addWidget(version_label)
         
+        version_layout.addStretch()  # Empujar el combo a la derecha
+        
         self.version_combo = QComboBox()
-        self.version_combo.setMinimumWidth(300)
+        self.version_combo.setFixedSize(300, 40)  # Misma altura que los botones
+        self.version_combo.setStyleSheet("font-size: 14px;")  # Fuente más grande
         self.version_combo.currentTextChanged.connect(self.on_version_changed)
         self.version_combo.currentTextChanged.connect(self.save_selected_version)
         version_layout.addWidget(self.version_combo)
@@ -536,59 +540,67 @@ class LauncherWindow(QMainWindow):
         refresh_button = QPushButton("🔄")
         refresh_button.setToolTip("Actualizar lista de versiones")
         refresh_button.clicked.connect(self.load_versions)
-        refresh_button.setFixedSize(40, 40)  # Tamaño fijo cuadrado
+        refresh_button.setFixedSize(40, 40)  # Misma altura que combo y label
         refresh_button.setStyleSheet("font-size: 20px; padding: 5px;")
         version_layout.addWidget(refresh_button)
         
         layout.addLayout(version_layout)
         
         # Selector de versión de Java
+        java_container = QVBoxLayout()
+        java_container.setSpacing(5)
+        
         java_layout = QHBoxLayout()
+        java_layout.setSpacing(5)  # Mismo espaciado que el layout de versiones
+        java_layout.setAlignment(Qt.AlignVCenter)  # Alinear verticalmente al centro
         java_label = QLabel("Versión Java:")
+        java_label.setFixedHeight(40)  # Misma altura que combo y botón
+        java_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)  # Alinear texto verticalmente
+        java_label.setStyleSheet("font-size: 14px;")  # Mismo tamaño de fuente
         java_layout.addWidget(java_label)
         
-        self.java_combo = QComboBox()
-        self.java_combo.setMinimumWidth(300)
-        java_layout.addWidget(self.java_combo)
+        java_layout.addStretch()  # Empujar el combo a la derecha
         
-        # Label para mostrar la versión de Java requerida
-        self.java_required_label = QLabel("")
-        self.java_required_label.setStyleSheet("color: blue; font-style: italic;")
-        java_layout.addWidget(self.java_required_label)
+        self.java_combo = QComboBox()
+        self.java_combo.setFixedSize(300, 40)  # Misma altura que los botones
+        self.java_combo.setStyleSheet("font-size: 14px;")  # Fuente más grande
+        java_layout.addWidget(self.java_combo)
         
         refresh_java_button = QPushButton("🔄")
         refresh_java_button.setToolTip("Actualizar lista de Java")
         refresh_java_button.clicked.connect(self.load_java_versions)
-        refresh_java_button.setFixedSize(40, 40)  # Tamaño fijo cuadrado
+        refresh_java_button.setFixedSize(40, 40)  # Misma altura que combo y label
         refresh_java_button.setStyleSheet("font-size: 20px; padding: 5px;")
         java_layout.addWidget(refresh_java_button)
         
-        layout.addLayout(java_layout)
+        java_container.addLayout(java_layout)
         
-        # Cargar versiones después de que message_area esté inicializado
-        self.load_versions()
+        # Label para mostrar la versión de Java requerida (debajo del dropdown)
+        self.java_required_label = QLabel("")
+        self.java_required_label.setStyleSheet("color: blue; font-style: italic;")
+        self.java_required_label.setContentsMargins(0, 0, 0, 0)
+        java_container.addWidget(self.java_required_label)
+        
+        layout.addLayout(java_container)
+        
+        # Cargar versiones de Java inmediatamente (es rápido)
         self.load_java_versions()
         
         # Conectar save_selected_version DESPUÉS de cargar las versiones
         # para evitar que se guarde durante la carga inicial
         self.version_combo.currentTextChanged.connect(self.save_selected_version)
         
-        # Botones
-        button_layout = QHBoxLayout()
+        # Mostrar mensaje inicial mientras se cargan las versiones
+        self.version_combo.addItem("Cargando versiones...")
+        self.version_combo.setEnabled(False)
         
-        self.login_button = QPushButton("Iniciar Sesión")
-        self.login_button.clicked.connect(self.start_authentication)
-        button_layout.addWidget(self.login_button)
+        # Botón de lanzar
+        button_layout = QHBoxLayout()
         
         self.launch_button = QPushButton("Lanzar Minecraft")
         self.launch_button.clicked.connect(self.launch_minecraft)
         # El botón se habilita cuando hay credenciales guardadas
         button_layout.addWidget(self.launch_button)
-        
-        self.logout_button = QPushButton("Cerrar Sesión")
-        self.logout_button.clicked.connect(self.logout)
-        self.logout_button.setEnabled(False)
-        button_layout.addWidget(self.logout_button)
         
         layout.addLayout(button_layout)
         
@@ -608,14 +620,27 @@ class LauncherWindow(QMainWindow):
             self.minecraft_status.setText("✗ Minecraft no detectado")
             self.minecraft_status.setStyleSheet("color: red;")
     
-    def load_versions(self):
-        """Carga las versiones de Minecraft disponibles (solo las descargadas)"""
+    def load_versions_async(self):
+        """Inicia la carga asíncrona de versiones de Minecraft"""
+        # Mostrar barra de progreso
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 0)  # Modo indeterminado
+        
+        # Crear y conectar thread
+        self.load_versions_thread = LoadVersionsThread(self.minecraft_launcher)
+        self.load_versions_thread.finished.connect(self.on_versions_loaded)
+        self.load_versions_thread.error.connect(self.on_versions_error)
+        self.load_versions_thread.start()
+    
+    def on_versions_loaded(self, versions):
+        """Se llama cuando las versiones se han cargado"""
+        # Ocultar barra de progreso
+        self.progress_bar.setVisible(False)
+        
         # Bloquear signals temporalmente para evitar que se guarde durante la carga
         self.version_combo.blockSignals(True)
         
         self.version_combo.clear()
-        # Solo mostrar versiones completamente descargadas
-        versions = self.minecraft_launcher.get_available_versions(only_downloaded=True)
         
         if versions:
             self.version_combo.addItems(versions)
@@ -632,7 +657,66 @@ class LauncherWindow(QMainWindow):
                 # Si no hay versión guardada o no está disponible, seleccionar la primera
                 if last_version:
                     self.add_message(f"Versión guardada '{last_version}' no está disponible, seleccionando primera versión")
+            self.version_combo.setEnabled(True)
         else:
+            self.version_combo.addItem("No hay versiones disponibles")
+            self.version_combo.setEnabled(False)
+            self.add_message("No se encontraron versiones de Minecraft descargadas")
+        
+        # Desbloquear signals después de cargar
+        self.version_combo.blockSignals(False)
+    
+    def on_versions_error(self, error_msg):
+        """Se llama cuando hay un error cargando las versiones"""
+        # Ocultar barra de progreso
+        self.progress_bar.setVisible(False)
+        
+        self.version_combo.clear()
+        self.version_combo.addItem("Error cargando versiones")
+        self.version_combo.setEnabled(False)
+        self.add_message(f"Error cargando versiones: {error_msg}")
+    
+    def load_versions(self):
+        """Carga las versiones de Minecraft disponibles (solo las descargadas) - versión síncrona para el botón refresh"""
+        # Bloquear signals temporalmente para evitar que se guarde durante la carga
+        self.version_combo.blockSignals(True)
+        
+        self.version_combo.clear()
+        self.version_combo.addItem("Cargando...")
+        self.version_combo.setEnabled(False)
+        
+        # Mostrar barra de progreso
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 0)  # Modo indeterminado
+        
+        # Forzar actualización de la UI
+        QApplication.processEvents()
+        
+        # Solo mostrar versiones completamente descargadas
+        versions = self.minecraft_launcher.get_available_versions(only_downloaded=True)
+        
+        # Ocultar barra de progreso
+        self.progress_bar.setVisible(False)
+        
+        if versions:
+            self.version_combo.clear()
+            self.version_combo.addItems(versions)
+            self.add_message(f"Versiones de Minecraft disponibles: {len(versions)} (solo descargadas)")
+            
+            # Cargar la última versión seleccionada
+            last_version = self.load_last_selected_version()
+            if last_version and last_version in versions:
+                index = self.version_combo.findText(last_version)
+                if index >= 0:
+                    self.version_combo.setCurrentIndex(index)
+                    self.add_message(f"Versión restaurada: {last_version}")
+            else:
+                # Si no hay versión guardada o no está disponible, seleccionar la primera
+                if last_version:
+                    self.add_message(f"Versión guardada '{last_version}' no está disponible, seleccionando primera versión")
+            self.version_combo.setEnabled(True)
+        else:
+            self.version_combo.clear()
             self.version_combo.addItem("No hay versiones disponibles")
             self.version_combo.setEnabled(False)
             self.add_message("No se encontraron versiones de Minecraft descargadas")
@@ -642,7 +726,15 @@ class LauncherWindow(QMainWindow):
     
     def save_selected_version(self, version: str):
         """Guarda la versión seleccionada. Crea el archivo si no existe."""
-        if not version or version == "No hay versiones disponibles":
+        # No guardar valores temporales o inválidos
+        invalid_values = [
+            "No hay versiones disponibles",
+            "Cargando versiones...",
+            "Cargando...",
+            "Error cargando versiones"
+        ]
+        
+        if not version or version in invalid_values:
             return
         
         try:
@@ -674,7 +766,8 @@ class LauncherWindow(QMainWindow):
             if not CONFIG_FILE.exists():
                 # Crear archivo de configuración con valores por defecto
                 default_config = {
-                    "last_selected_version": None
+                    "last_selected_version": None,
+                    "show_full_java_path": False
                 }
                 try:
                     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
@@ -696,11 +789,26 @@ class LauncherWindow(QMainWindow):
         self.java_combo.clear()
         java_installations = self.minecraft_launcher.find_java_installations()
         
+        # Leer configuración para determinar si mostrar la ruta completa
+        show_full_path = False
+        try:
+            import json
+            from config import CONFIG_FILE
+            if CONFIG_FILE.exists():
+                with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    show_full_path = config.get('show_full_java_path', False)
+        except Exception:
+            pass  # Si hay error, usar valor por defecto (False)
+        
         if java_installations:
             # Ordenar por versión (mayor a menor)
             sorted_versions = sorted(java_installations.items(), key=lambda x: x[0], reverse=True)
             for version, path in sorted_versions:
-                display_text = f"Java {version} ({path})"
+                if show_full_path:
+                    display_text = f"Java {version} ({path})"
+                else:
+                    display_text = f"Java {version}"
                 self.java_combo.addItem(display_text, path)  # Guardar el path como data
             
             self.add_message(f"Versiones de Java disponibles: {len(java_installations)}")
@@ -711,6 +819,81 @@ class LauncherWindow(QMainWindow):
             self.java_combo.addItem("No hay Java disponible")
             self.java_combo.setEnabled(False)
             self.add_message("No se encontraron instalaciones de Java")
+    
+    def download_java_async(self, java_version: int, callback=None):
+        """
+        Inicia la descarga de Java de forma asíncrona usando la barra de progreso principal.
+        callback: función opcional que se llama cuando termina (success: bool, java_path: str)
+        """
+        # Inicializar variables de estado
+        self._java_download_success = False
+        self._downloaded_java_path = None
+        self._java_download_callback = callback
+        
+        # Mostrar barra de progreso
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_label.setVisible(True)
+        self.progress_label.setText(f"Descargando Java {java_version}...")
+        
+        # Deshabilitar botones mientras descarga
+        self.launch_button.setEnabled(False)
+        
+        # Crear y conectar thread
+        downloader = JavaDownloader(self.minecraft_launcher.minecraft_path)
+        self.java_download_thread = JavaDownloadThread(downloader, java_version)
+        self.java_download_thread.progress.connect(self.on_java_download_progress)
+        self.java_download_thread.finished.connect(self.on_java_download_finished)
+        self.java_download_thread.error.connect(self.on_java_download_error)
+        self.java_download_thread.message.connect(self.on_java_download_message)
+        self.java_download_thread.start()
+    
+    def _complete_java_download(self):
+        """Completa el proceso de descarga de Java"""
+        # Ocultar barra de progreso
+        self.progress_bar.setVisible(False)
+        self.progress_label.setVisible(False)
+        
+        # Rehabilitar botones
+        self.launch_button.setEnabled(True)
+        
+        # Llamar callback si existe
+        if hasattr(self, '_java_download_callback') and self._java_download_callback:
+            self._java_download_callback(self._java_download_success, self._downloaded_java_path)
+    
+    def on_java_download_progress(self, downloaded: int, total: int):
+        """Actualiza la barra de progreso durante la descarga de Java"""
+        if total > 0:
+            percent = int((downloaded / total) * 100)
+            self.progress_bar.setValue(percent)
+            mb_downloaded = downloaded / (1024 * 1024)
+            mb_total = total / (1024 * 1024)
+            self.progress_label.setText(f"Descargando Java: {mb_downloaded:.1f} MB / {mb_total:.1f} MB ({percent}%)")
+        else:
+            self.progress_bar.setRange(0, 0)  # Modo indeterminado
+    
+    def on_java_download_finished(self, java_path: str):
+        """Se llama cuando la descarga de Java se completa"""
+        self.progress_bar.setValue(100)
+        self.progress_label.setText("Descarga completada!")
+        self._java_download_success = True
+        self._downloaded_java_path = java_path
+        self.add_message(f"Java descargada correctamente: {java_path}")
+        self._complete_java_download()
+    
+    def on_java_download_error(self, error_msg: str):
+        """Se llama cuando hay un error en la descarga de Java"""
+        self.progress_label.setText(f"Error: {error_msg}")
+        self._java_download_success = False
+        self.add_message(f"Error descargando Java: {error_msg}")
+        QMessageBox.critical(self, "Error", f"No se pudo descargar Java:\n{error_msg}")
+        self._complete_java_download()
+    
+    def on_java_download_message(self, message: str):
+        """Se llama cuando hay un mensaje de la descarga de Java"""
+        self.progress_label.setText(message)
+        self.add_message(message)
     
     def on_version_changed(self, version_name: str):
         """Se llama cuando cambia la versión de Minecraft seleccionada"""
@@ -768,7 +951,6 @@ class LauncherWindow(QMainWindow):
     
     def start_authentication(self):
         """Inicia el proceso de autenticación"""
-        self.login_button.setEnabled(False)
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)  # Modo indeterminado
         
@@ -795,10 +977,8 @@ class LauncherWindow(QMainWindow):
                 self.complete_authentication(redirect_url)
             else:
                 self.add_message("No se proporcionó URL de redirección")
-                self.login_button.setEnabled(True)
         else:
             self.add_message("Autenticación cancelada")
-            self.login_button.setEnabled(True)
     
     def complete_authentication(self, redirect_url):
         """Completa la autenticación con la URL de redirección"""
@@ -818,7 +998,6 @@ class LauncherWindow(QMainWindow):
     def on_authentication_success(self, credentials: dict):
         """Maneja la autenticación exitosa"""
         self.progress_bar.setVisible(False)
-        self.login_button.setEnabled(True)
         
         # Guardar credenciales
         if self.credential_storage.save_credentials(credentials):
@@ -826,18 +1005,15 @@ class LauncherWindow(QMainWindow):
         
         # Actualizar UI
         username = credentials.get("username", "Usuario")
-        self.user_label.setText(f"Conectado como: {username}")
-        self.user_label.setStyleSheet("color: #a78bfa; font-size: 16px; font-weight: bold; margin: 10px;")
+        self.update_user_widget(credentials)
         # Habilitar el botón de lanzar cuando hay sesión
         self.launch_button.setEnabled(True)
-        self.logout_button.setEnabled(True)
         
         self.add_message(f"Autenticación exitosa: {username}")
     
     def on_authentication_error(self, error: str):
         """Maneja errores de autenticación"""
         self.progress_bar.setVisible(False)
-        self.login_button.setEnabled(True)
         self.add_message(f"Error: {error}")
         QMessageBox.warning(self, "Error de Autenticación", error)
     
@@ -850,20 +1026,20 @@ class LauncherWindow(QMainWindow):
                 expires_at = credentials.get("expires_at", 0)
                 if time.time() < expires_at:
                     username = credentials.get("username", "Usuario")
-                    self.user_label.setText(f"Conectado como: {username}")
-                    self.user_label.setStyleSheet("color: #a78bfa; font-size: 16px; font-weight: bold; margin: 10px;")
+                    self.update_user_widget(credentials)
                     # Habilitar el botón de lanzar cuando hay sesión
                     self.launch_button.setEnabled(True)
-                    self.logout_button.setEnabled(True)
                     self.add_message(f"Credenciales cargadas para: {username}")
                 else:
                     self.add_message("Las credenciales han expirado. Por favor, inicia sesión nuevamente.")
+                    self.update_user_widget(None)
     
     def launch_minecraft(self):
         """Lanza Minecraft con las credenciales guardadas"""
         credentials = self.credential_storage.load_credentials()
         if not credentials:
-            QMessageBox.warning(self, "Error", "No hay credenciales guardadas")
+            # Si no hay credenciales, iniciar sesión automáticamente
+            self.start_authentication()
             return
         
         if not self.minecraft_launcher.check_minecraft_installed():
@@ -931,16 +1107,30 @@ class LauncherWindow(QMainWindow):
                 
                 if reply == QMessageBox.Yes:
                     self.add_message(f"Descargando Java {required_java}...")
-                    dialog = JavaDownloadDialog(required_java, self.minecraft_launcher.minecraft_path, self)
-                    if dialog.exec_() == QDialog.Accepted:
-                        selected_java_path = dialog.get_java_path()
-                        self.add_message(f"Java {required_java} descargada correctamente")
-                        # Recargar versiones de Java
-                        self.load_java_versions()
-                    else:
-                        self.add_message("Descarga de Java cancelada")
-                        self.launch_button.setEnabled(True)
-                        return
+                    
+                    def on_java_downloaded(success, java_path):
+                        if success and java_path:
+                            self.add_message(f"Java {required_java} descargada correctamente")
+                            # Recargar versiones de Java
+                            self.load_java_versions()
+                            # Continuar con el lanzamiento
+                            self.add_message(f"Lanzando Minecraft version: {selected_version}")
+                            self.add_message(f"Usando Java: {java_path}")
+                            self.launch_button.setEnabled(False)
+                            success_launch, _ = self.minecraft_launcher.launch_minecraft(credentials, selected_version, java_path)
+                            if success_launch:
+                                self.add_message("Minecraft proceso iniciado correctamente")
+                                self.add_message("El juego deberia abrirse en breve...")
+                                self.launch_button.setEnabled(True)
+                            else:
+                                self.add_message("Error al lanzar Minecraft")
+                                self.launch_button.setEnabled(True)
+                        else:
+                            self.add_message("Descarga de Java cancelada o falló")
+                            self.launch_button.setEnabled(True)
+                    
+                    self.download_java_async(required_java, on_java_downloaded)
+                    return  # Salir aquí, el callback continuará
                 else:
                     QMessageBox.warning(
                         self,
@@ -1023,25 +1213,29 @@ class LauncherWindow(QMainWindow):
                         
                         if reply == QMessageBox.Yes:
                             self.add_message(f"Descargando Java {required_java}...")
-                            dialog = JavaDownloadDialog(required_java, self.minecraft_launcher.minecraft_path, self)
-                            if dialog.exec_() == QDialog.Accepted:
-                                downloaded_java = dialog.get_java_path()
-                                self.add_message(f"Java {required_java} descargada correctamente")
-                                # Recargar versiones de Java
-                                self.load_java_versions()
-                                # Intentar lanzar de nuevo con la Java descargada
-                                self.add_message(f"Reintentando lanzar con Java {required_java}...")
-                                self.launch_button.setEnabled(False)
-                                success, _ = self.minecraft_launcher.launch_minecraft(credentials, selected_version, downloaded_java)
-                                if success:
-                                    self.add_message("Minecraft proceso iniciado correctamente")
-                                    self.add_message("El juego deberia abrirse en breve...")
+                            
+                            def on_java_downloaded_retry(success, java_path):
+                                if success and java_path:
+                                    self.add_message(f"Java {required_java} descargada correctamente")
+                                    # Recargar versiones de Java
+                                    self.load_java_versions()
+                                    # Intentar lanzar de nuevo con la Java descargada
+                                    self.add_message(f"Reintentando lanzar con Java {required_java}...")
+                                    self.launch_button.setEnabled(False)
+                                    success_launch, _ = self.minecraft_launcher.launch_minecraft(credentials, selected_version, java_path)
+                                    if success_launch:
+                                        self.add_message("Minecraft proceso iniciado correctamente")
+                                        self.add_message("El juego deberia abrirse en breve...")
+                                        self.launch_button.setEnabled(True)
+                                    else:
+                                        self.add_message("Error al lanzar Minecraft despues de descargar Java")
+                                        self.launch_button.setEnabled(True)
                                 else:
-                                    self.add_message("Error al lanzar Minecraft despues de descargar Java")
+                                    self.add_message("Descarga de Java cancelada o falló")
                                     self.launch_button.setEnabled(True)
-                            else:
-                                self.add_message("Descarga de Java cancelada")
-                            return
+                            
+                            self.download_java_async(required_java, on_java_downloaded_retry)
+                            return  # Salir aquí, el callback continuará
                         else:
                             QMessageBox.warning(
                                 self,
@@ -1052,6 +1246,89 @@ class LauncherWindow(QMainWindow):
                     return
             
             QMessageBox.critical(self, "Error", "No se pudo lanzar Minecraft. Revisa los mensajes para mas detalles.")
+    
+    def _on_user_widget_clicked(self):
+        """Maneja el clic en el widget de usuario"""
+        credentials = self.credential_storage.load_credentials()
+        if credentials:
+            # Mostrar menú desplegable con opción de cerrar sesión
+            menu = QMenu(self)
+            logout_action = menu.addAction("Cerrar sesión")
+            logout_action.triggered.connect(self.logout)
+            
+            # Mostrar el menú debajo del widget de usuario
+            menu.exec_(self.user_widget.mapToGlobal(self.user_widget.rect().bottomLeft()))
+        else:
+            # Si no hay sesión, iniciar autenticación
+            self.start_authentication()
+    
+    def update_user_widget(self, credentials: Optional[dict]):
+        """Actualiza el widget de usuario con la información del jugador"""
+        if credentials:
+            username = credentials.get("username", "Usuario")
+            uuid = credentials.get("uuid", "")
+            
+            # Mostrar avatar y nombre
+            self.user_name_label.setText(username)
+            self.user_name_label.setStyleSheet("""
+                QLabel#userNameLabel {
+                    color: #a78bfa;
+                    font-size: 12px;
+                    padding: 5px 10px;
+                    border-radius: 5px;
+                    background: transparent;
+                }
+                QLabel#userNameLabel:hover {
+                    background: rgba(139, 92, 246, 0.3);
+                    cursor: pointer;
+                }
+            """)
+            
+            # Cargar avatar
+            if uuid:
+                self._load_user_avatar(uuid)
+        else:
+            # Mostrar "Iniciar sesión"
+            self.user_name_label.setText("Iniciar sesión")
+            self.user_name_label.setStyleSheet("""
+                QLabel#userNameLabel {
+                    color: #e9d5ff;
+                    font-size: 12px;
+                    padding: 5px 10px;
+                    border-radius: 5px;
+                    background: transparent;
+                }
+                QLabel#userNameLabel:hover {
+                    background: rgba(139, 92, 246, 0.3);
+                    cursor: pointer;
+                }
+            """)
+            self.user_avatar_label.setVisible(False)
+            self.user_avatar_label.clear()
+    
+    def _load_user_avatar(self, uuid: str):
+        """Carga el avatar del jugador desde la API de Minecraft"""
+        try:
+            # Formatear UUID (eliminar guiones si los tiene, Crafatar los acepta con o sin guiones)
+            # Pero es mejor asegurarse de que tenga el formato correcto
+            uuid_clean = uuid.replace('-', '') if uuid else ''
+            if not uuid_clean:
+                return
+            
+            # Usar la API de Crafatar para obtener el avatar
+            # Formato: https://crafatar.com/avatars/{uuid}?size=32
+            avatar_url = f"https://crafatar.com/avatars/{uuid_clean}?size=32&default=MHF_Steve"
+            
+            response = requests.get(avatar_url, timeout=5)
+            if response.status_code == 200:
+                pixmap = QPixmap()
+                pixmap.loadFromData(response.content)
+                self.user_avatar_label.setPixmap(pixmap)
+                self.user_avatar_label.setVisible(True)
+        except Exception as e:
+            # Si falla, simplemente no mostrar avatar
+            print(f"Error cargando avatar: {e}")
+            self.user_avatar_label.setVisible(False)
     
     def logout(self):
         """Cierra la sesión y elimina las credenciales"""
@@ -1064,11 +1341,9 @@ class LauncherWindow(QMainWindow):
         
         if reply == QMessageBox.Yes:
             self.credential_storage.clear_credentials()
-            self.user_label.setText("No autenticado")
-            self.user_label.setStyleSheet("color: #fca5a5; font-size: 16px; font-weight: bold; margin: 10px;")
+            self.update_user_widget(None)
             # Deshabilitar el botón de lanzar cuando no hay sesión
             self.launch_button.setEnabled(False)
-            self.logout_button.setEnabled(False)
             self.add_message("Sesión cerrada")
     
     def center_window(self):

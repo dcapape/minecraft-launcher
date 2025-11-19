@@ -5,13 +5,15 @@ import json
 import os
 from cryptography.fernet import Fernet
 from typing import Optional, Dict
+from config import CREDENTIALS_FILE, KEY_FILE
 
 class CredentialStorage:
     """Gestiona el almacenamiento seguro de credenciales"""
     
-    def __init__(self, storage_file: str = "credentials.json"):
-        self.storage_file = storage_file
-        self.key_file = "key.key"
+    def __init__(self, storage_file: Optional[str] = None, key_file: Optional[str] = None):
+        # Usar rutas de config.py si no se especifican
+        self.storage_file = str(storage_file) if storage_file else str(CREDENTIALS_FILE)
+        self.key_file = str(key_file) if key_file else str(KEY_FILE)
         self._cipher = None
         self._load_or_create_key()
     

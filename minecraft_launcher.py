@@ -36,11 +36,20 @@ class MinecraftLauncher:
     def get_java_version(self, java_exe: str) -> Optional[int]:
         """Obtiene la versión de Java (número mayor, ej: 8, 11, 17, 21)"""
         try:
+            creationflags = 0
+            startupinfo = None
+            if self.system == "Windows":
+                creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
             result = subprocess.run(
                 [java_exe, "-version"],
                 capture_output=True,
                 text=True,
-                timeout=5
+                timeout=5,
+                creationflags=creationflags,
+                startupinfo=startupinfo
             )
             
             # Parsear la versión del output
@@ -188,11 +197,20 @@ class MinecraftLauncher:
             # Fallback: intentar java/javaw en PATH
             for java_name in ["java", "javaw"]:
                 try:
+                    creationflags = 0
+                    startupinfo = None
+                    if self.system == "Windows":
+                        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                        startupinfo = subprocess.STARTUPINFO()
+                        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
                     result = subprocess.run(
                         [java_name, "-version"],
                         capture_output=True,
                         text=True,
-                        timeout=5
+                        timeout=5,
+                        creationflags=creationflags,
+                        startupinfo=startupinfo
                     )
                     if result.returncode == 0 or result.stderr:
                         return java_name
