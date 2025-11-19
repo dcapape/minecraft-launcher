@@ -283,10 +283,28 @@ The launcher properly handles version inheritance by:
 ## Continuous Integration / Releases
 
 This project uses GitHub Actions to automatically build the executable when:
-- Code is pushed to `main` or `master` branch
-- A new release is created on GitHub
+- Code is pushed to `main` or `master` branch (generates artifacts only)
+- A tag starting with `v` is pushed (e.g., `v1.0.0`) - **automatically creates a release**
+- A new release is created manually on GitHub
 
-### Creating a Release
+### Creating a Release (Recommended Method)
+
+**Method 1: Using Git Tags (Automatic Release)**
+
+1. **Create and push a tag:**
+   ```bash
+   git tag v1.0.0
+   git push origin v1.0.0
+   ```
+
+2. **GitHub Actions will automatically:**
+   - Build the Windows executable
+   - Create a ZIP archive
+   - Create a new release with the tag name
+   - Attach both files to the release
+   - Make the release available for download
+
+**Method 2: Manual Release on GitHub**
 
 1. **Create a new release on GitHub:**
    - Go to the "Releases" section of the repository
@@ -298,8 +316,7 @@ This project uses GitHub Actions to automatically build the executable when:
 2. **GitHub Actions will automatically:**
    - Build the Windows executable
    - Create a ZIP archive
-   - Attach both files to the release
-   - Make the release available for download
+   - Attach both files to the existing release
 
 ### Downloading Pre-built Executables
 

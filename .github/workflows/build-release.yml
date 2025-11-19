@@ -5,6 +5,8 @@ on:
     branches:
       - main
       - master
+    tags:
+      - 'v*'  # Se ejecuta cuando se hace push de un tag que empieza con 'v'
   release:
     types: [created]
   workflow_dispatch:
@@ -32,19 +34,24 @@ jobs:
       run: |
         python -m PyInstaller launcher.spec --clean --noconfirm
         
-    - name: Get version
+    - name: Get version and tag
       id: get_version
       run: |
         if ("${{ github.event_name }}" -eq "release") {
           $version = "${{ github.event.release.tag_name }}"
+          $tag = "${{ github.event.release.tag_name }}"
         } elseif ("${{ github.ref }}" -match "refs/tags/(.+)") {
           $version = $matches[1]
+          $tag = $matches[1]
         } else {
           $shortSha = "${{ github.sha }}".Substring(0, 7)
           $version = "dev-$shortSha"
+          $tag = ""
         }
         echo "version=$version" >> $env:GITHUB_OUTPUT
+        echo "tag=$tag" >> $env:GITHUB_OUTPUT
         echo "Version: $version"
+        echo "Tag: $tag"
       shell: pwsh
         
     - name: Create release archive
@@ -63,7 +70,36 @@ jobs:
           MinecraftLauncher-*-windows.zip
         retention-days: 30
           
-    - name: Upload to Release
+    - name: Create or Update Release (from tag)
+      if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ steps.get_version.outputs.tag }}
+        name: Release ${{ steps.get_version.outputs.tag }}
+        files: |
+          dist/MinecraftLauncher.exe
+          MinecraftLauncher-*-windows.zip
+        draft: false
+        prerelease: false
+        body: |
+          ## Minecraft Launcher - Windows
+          
+          **Version:** ${{ steps.get_version.outputs.tag }}
+          
+          ### Installation
+          
+          1. Download `MinecraftLauncher.exe` or the ZIP archive
+          2. Run the executable
+          3. Sign in with your Microsoft account
+          4. Launch Minecraft!
+          
+          ### Automatic Build
+          
+          This release was automatically created from tag ${{ steps.get_version.outputs.tag }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: Upload to Release (from GitHub Release)
       if: github.event_name == 'release'
       uses: softprops/action-gh-release@v1
       with:
