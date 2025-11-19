@@ -26,8 +26,8 @@ A custom launcher for Minecraft Java Edition that maintains user credentials for
 ### 1. Clone or download this repository
 
 ```bash
-git clone <repository-url>
-cd launcher
+git clone https://github.com/dcapape/minecraft-launcher.git
+cd minecraft-launcher
 ```
 
 ### 2. Create a virtual environment (recommended)
