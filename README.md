@@ -34,7 +34,7 @@ cd minecraft-launcher
 
 ```bash
 # On Windows
-python -m venv .venv
+python3 -m venv .venv
 .venv\Scripts\activate
 
 # On Linux/macOS
@@ -42,10 +42,13 @@ python3 -m venv .venv
 source .venv/bin/activate
 ```
 
+**Note**: If `python` points to Python 2.7 on your system, use `python3` instead.
+
 ### 3. Install dependencies
 
 ```bash
-pip install -r requirements.txt
+# Make sure you're using Python 3
+python3 -m pip install -r requirements.txt
 ```
 
 ### 4. Verify installation
@@ -60,10 +63,14 @@ Make sure all required packages are installed:
 
 ### Running the Launcher
 
-1. **Start the launcher:**
-   ```bash
-   python launcher.py
-   ```
+1. **Start the launcher:**  
+```bash
+# On Windows/Linux/macOS - use python3 if python points to Python 2.7
+python3 launcher.py
+
+# Or if python already points to Python 3:
+python launcher.py
+```
 
 2. **Authenticate:**
    - Click "Sign In" to authenticate with your Microsoft account
@@ -84,10 +91,66 @@ Make sure all required packages are installed:
 You can also launch Minecraft directly from the command line:
 
 ```bash
-python launcher.py
+# Use python3 if python points to Python 2.7
+python3 launcher.py
 ```
 
 The launcher will use saved credentials if available, or prompt for authentication.
+
+## Building an Executable
+
+You can create a standalone executable using PyInstaller. This allows you to distribute the launcher without requiring Python to be installed.
+
+### Prerequisites
+
+Make sure PyInstaller is installed:
+
+```bash
+python3 -m pip install pyinstaller
+```
+
+### Building on Windows
+
+1. **Using the batch script (recommended):**
+   ```bash
+   build_exe.bat
+   ```
+
+2. **Or manually:**
+   ```bash
+   python3 -m PyInstaller launcher.spec
+   ```
+
+The executable will be created in the `dist/` folder as `MinecraftLauncher.exe`.
+
+### Building on Linux/macOS
+
+1. **Using the shell script:**
+   ```bash
+   chmod +x build_exe.sh
+   ./build_exe.sh
+   ```
+
+2. **Or manually:**
+   ```bash
+   python3 -m PyInstaller launcher.spec
+   ```
+
+The executable will be created in the `dist/` folder as `MinecraftLauncher`.
+
+### Customizing the Build
+
+You can modify `launcher.spec` to customize the build:
+- Add an icon: Set `icon='icon.ico'` in the `EXE` section
+- Include additional data files: Add them to the `datas` list
+- Add hidden imports: Add them to the `hiddenimports` list
+
+### Notes
+
+- The first build may take several minutes as PyInstaller analyzes all dependencies
+- The executable will be quite large (~100-200 MB) as it includes Python, PyQt5, and all dependencies
+- The executable is standalone and doesn't require Python or any dependencies to run
+- On Windows, the executable will be windowed (no console) as specified by `--windowed`
 
 ## How It Works
 
@@ -216,6 +279,35 @@ The launcher properly handles version inheritance by:
 - For advanced features (mod management, version downloads, etc.), consider using official launchers or more complete alternatives
 - Minecraft must be properly installed with all dependencies
 - Some edge cases in version JSONs may not be fully supported
+
+## Continuous Integration / Releases
+
+This project uses GitHub Actions to automatically build the executable when:
+- Code is pushed to `main` or `master` branch
+- A new release is created on GitHub
+
+### Creating a Release
+
+1. **Create a new release on GitHub:**
+   - Go to the "Releases" section of the repository
+   - Click "Draft a new release"
+   - Create a new tag (e.g., `v1.0.0`)
+   - Add release notes describing the changes
+   - Click "Publish release"
+
+2. **GitHub Actions will automatically:**
+   - Build the Windows executable
+   - Create a ZIP archive
+   - Attach both files to the release
+   - Make the release available for download
+
+### Downloading Pre-built Executables
+
+You can download the latest executable from the [Releases](https://github.com/dcapape/minecraft-launcher/releases) page:
+- `MinecraftLauncher.exe` - Standalone executable
+- `MinecraftLauncher-<version>-windows.zip` - ZIP archive containing the executable
+
+No installation required - just download and run!
 
 ## Contributing
 
