@@ -109,19 +109,54 @@ class RedirectUrlDialog(QDialog):
     
     def __init__(self, auth_url, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Autenticación de Microsoft")
-        self.setGeometry(100, 100, 800, 600)
+        self.setWindowTitle("Autenticación")
+        
+        # Ventana sin barra de título (frameless) e independiente
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        
+        # Tamaño fijo
+        self.resize(800, 600)
         self.redirect_url = None
         
-        layout = QVBoxLayout()
+        # Centrar en la pantalla donde está la ventana principal
+        self._center_on_parent_screen(parent)
         
-        # Información
-        info_label = QLabel(
-            "Completa la autenticación en el navegador de abajo.\n"
-            "Serás redirigido automáticamente después de autenticarte."
-        )
-        info_label.setWordWrap(True)
-        layout.addWidget(info_label)
+        # Widget central con estilo gaming
+        central_widget = QWidget()
+        central_widget.setObjectName("centralWidget")
+        
+        layout = QVBoxLayout()
+        layout.setContentsMargins(20, 5, 20, 5)
+        layout.setSpacing(10)
+        
+        # Barra de título personalizada
+        title_bar = TitleBar(self)
+        title_bar.setFixedHeight(35)
+        title_bar.setObjectName("titleBar")
+        title_bar_layout = QHBoxLayout()
+        title_bar_layout.setContentsMargins(10, 0, 10, 0)
+        title_bar_layout.setSpacing(5)
+        title_bar.setLayout(title_bar_layout)
+        
+        # Título
+        title = QLabel("Autenticación")
+        title.setObjectName("titleLabel")
+        title.setAlignment(Qt.AlignCenter)
+        title_bar_layout.addWidget(title, 1)
+        
+        # Botones de ventana
+        minimize_btn = QPushButton("−")
+        minimize_btn.setObjectName("minimizeButton")
+        minimize_btn.clicked.connect(self.showMinimized)
+        title_bar_layout.addWidget(minimize_btn)
+        
+        close_btn = QPushButton("×")
+        close_btn.setObjectName("closeButton")
+        close_btn.clicked.connect(self.reject)
+        title_bar_layout.addWidget(close_btn)
+        
+        layout.addWidget(title_bar)
         
         # Navegador embebido
         self.web_view = QWebEngineView()
@@ -136,15 +171,111 @@ class RedirectUrlDialog(QDialog):
         # Botones
         button_layout = QHBoxLayout()
         
-        self.status_label = QLabel("Cargando...")
+        self.status_label = QLabel("")
+        self.status_label.setAlignment(Qt.AlignCenter)
+        self.status_label.setVisible(False)
         button_layout.addWidget(self.status_label)
         
-        buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
-        buttons.rejected.connect(self.reject)
-        button_layout.addWidget(buttons)
+        button_layout.addStretch()
+        
+        cancel_button = QPushButton("Cancelar")
+        cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(cancel_button)
         
         layout.addLayout(button_layout)
-        self.setLayout(layout)
+        
+        central_widget.setLayout(layout)
+        
+        # Layout principal del diálogo
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.addWidget(central_widget)
+        self.setLayout(main_layout)
+        
+        # Aplicar estilos gaming morados
+        self.setStyleSheet("""
+            QDialog {
+                background: transparent;
+            }
+            #centralWidget {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #1a0d2e, stop:0.5 #2d1b4e, stop:1 #1a0d2e);
+                border-radius: 15px;
+                border: 2px solid #8b5cf6;
+            }
+            #titleBar {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #2d1b4e, stop:1 #1a0d2e);
+                border-top-left-radius: 15px;
+                border-top-right-radius: 15px;
+                border-bottom: 1px solid #8b5cf6;
+            }
+            QLabel {
+                color: #e9d5ff;
+                background: transparent;
+            }
+            QLabel#titleLabel {
+                color: #c084fc;
+                font-size: 20px;
+                font-weight: bold;
+            }
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #7c3aed, stop:1 #5b21b6);
+                color: white;
+                border: 2px solid #8b5cf6;
+                border-radius: 8px;
+                padding: 10px 20px;
+                font-size: 14px;
+                font-weight: bold;
+                min-height: 30px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #8b5cf6, stop:1 #6d28d9);
+                border: 2px solid #a78bfa;
+            }
+            QPushButton:pressed {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #5b21b6, stop:1 #4c1d95);
+            }
+            QPushButton#closeButton {
+                background: #dc2626;
+                border: 1px solid #ef4444;
+                border-radius: 3px;
+                min-width: 20px;
+                max-width: 20px;
+                min-height: 20px;
+                max-height: 20px;
+                font-size: 16px;
+                font-weight: bold;
+                padding: 0px;
+            }
+            QPushButton#closeButton:hover {
+                background: #ef4444;
+                border: 1px solid #f87171;
+            }
+            QPushButton#minimizeButton {
+                background: #6b7280;
+                border: 1px solid #9ca3af;
+                border-radius: 3px;
+                min-width: 20px;
+                max-width: 20px;
+                min-height: 20px;
+                max-height: 20px;
+                font-size: 16px;
+                font-weight: bold;
+                padding: 0px;
+            }
+            QPushButton#minimizeButton:hover {
+                background: #9ca3af;
+                border: 1px solid #d1d5db;
+            }
+            QWebEngineView {
+                background: #1a0d2e;
+                border-radius: 8px;
+            }
+        """)
     
     def on_url_changed(self, url):
         """Se llama cuando cambia la URL del navegador"""
@@ -158,8 +289,6 @@ class RedirectUrlDialog(QDialog):
             # Si tiene el parámetro 'code', es la redirección exitosa
             if "code" in params:
                 self.redirect_url = url_str
-                self.status_label.setText("✓ Autenticación exitosa! Cerrando...")
-                self.status_label.setStyleSheet("color: green; font-weight: bold;")
                 # Cerrar el diálogo automáticamente después de un breve delay
                 QApplication.processEvents()
                 self.accept()
@@ -167,13 +296,13 @@ class RedirectUrlDialog(QDialog):
                 # Error en la autenticación
                 error = params.get("error", ["Error desconocido"])[0]
                 error_desc = params.get("error_description", [""])[0]
-                self.status_label.setText(f"Error: {error} - {error_desc}")
-                self.status_label.setStyleSheet("color: red;")
+                self.status_label.setText(f"Error: {error}")
+                self.status_label.setStyleSheet("color: #fca5a5; font-weight: bold;")
+                self.status_label.setVisible(True)
             else:
                 # URL de redirección sin código (puede ser una página intermedia)
                 # Intentar leer el código desde el contenido de la página
                 self.web_view.page().toPlainText(self._check_page_content)
-                self.status_label.setText("Verificando autenticación...")
     
     def _check_page_content(self, content):
         """Verifica el contenido de la página en busca del código"""
@@ -188,23 +317,40 @@ class RedirectUrlDialog(QDialog):
                 self.redirect_url = f"{current_url.split('?')[0]}?code={code}"
             else:
                 self.redirect_url = f"{current_url}?code={code}"
-            self.status_label.setText("✓ Código encontrado! Cerrando...")
-            self.status_label.setStyleSheet("color: green; font-weight: bold;")
             QApplication.processEvents()
             self.accept()
         elif "removed" in self.web_view.url().toString():
-            self.status_label.setText("⚠ La URL de redirección no contiene el código.\nEsto puede indicar un problema con la autenticación.\nIntenta usar el método de copiar/pegar la URL manualmente.")
-            self.status_label.setStyleSheet("color: orange;")
+            self.status_label.setText("Error: No se pudo obtener el código de autenticación")
+            self.status_label.setStyleSheet("color: #fca5a5; font-weight: bold;")
+            self.status_label.setVisible(True)
     
     def on_load_finished(self, success):
         """Se llama cuando termina de cargar una página"""
         if success:
             current_url = self.web_view.url().toString()
-            if "login.live.com" in current_url or "microsoft.com" in current_url:
-                self.status_label.setText("Por favor, inicia sesión...")
-            elif "oauth20_desktop.srf" in current_url:
+            if "oauth20_desktop.srf" in current_url:
                 # Ya estamos en la página de redirección
                 self.on_url_changed(self.web_view.url())
+    
+    def _center_on_parent_screen(self, parent):
+        """Centra la ventana en la pantalla donde está la ventana principal"""
+        if parent:
+            # Obtener la geometría de la ventana principal
+            parent_geometry = parent.geometry()
+            parent_center = parent_geometry.center()
+            
+            # Calcular la posición para centrar esta ventana
+            dialog_geometry = self.frameGeometry()
+            dialog_geometry.moveCenter(parent_center)
+            self.move(dialog_geometry.topLeft())
+        else:
+            # Si no hay parent, centrar en la pantalla principal
+            from PyQt5.QtWidgets import QDesktopWidget
+            screen = QApplication.desktop().screenGeometry()
+            center_point = screen.center()
+            frame_geometry = self.frameGeometry()
+            frame_geometry.moveCenter(center_point)
+            self.move(frame_geometry.topLeft())
     
     def get_redirect_url(self):
         return self.redirect_url
