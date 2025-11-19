@@ -37,21 +37,37 @@ jobs:
     - name: Get version and tag
       id: get_version
       run: |
-        if ("${{ github.event_name }}" -eq "release") {
+        $ref = "${{ github.ref }}"
+        $eventName = "${{ github.event_name }}"
+        
+        Write-Host "Event name: $eventName"
+        Write-Host "Ref: $ref"
+        
+        # Verificar si es un release de GitHub
+        if ($eventName -eq "release") {
           $version = "${{ github.event.release.tag_name }}"
           $tag = "${{ github.event.release.tag_name }}"
-        } elseif ("${{ github.ref }}" -match "refs/tags/(.+)") {
-          $version = $matches[1]
-          $tag = $matches[1]
-        } else {
+          Write-Host "Detected: GitHub Release - Tag: $tag"
+        }
+        # Verificar si es un push de tag (refs/tags/v1.0.0)
+        elseif ($ref -like "refs/tags/*") {
+          $tag = $ref -replace "refs/tags/", ""
+          $version = $tag
+          Write-Host "Detected: Git Tag Push - Tag: $tag"
+        }
+        # Es un push de branch
+        else {
           $shortSha = "${{ github.sha }}".Substring(0, 7)
           $version = "dev-$shortSha"
           $tag = ""
+          Write-Host "Detected: Branch Push - Version: $version"
         }
+        
+        # Escribir outputs
         echo "version=$version" >> $env:GITHUB_OUTPUT
         echo "tag=$tag" >> $env:GITHUB_OUTPUT
-        echo "Version: $version"
-        echo "Tag: $tag"
+        Write-Host "Final Version: $version"
+        Write-Host "Final Tag: $tag"
       shell: pwsh
         
     - name: Create release archive
@@ -71,7 +87,7 @@ jobs:
         retention-days: 30
           
     - name: Create or Update Release (from tag)
-      if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+      if: startsWith(github.ref, 'refs/tags/')
       uses: softprops/action-gh-release@v1
       with:
         tag_name: ${{ steps.get_version.outputs.tag }}
