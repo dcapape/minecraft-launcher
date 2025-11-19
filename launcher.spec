@@ -6,9 +6,7 @@ a = Analysis(
     ['launcher.py'],
     pathex=[],
     binaries=[],
-    datas=[
-        ('launcher_config.json', '.'),
-    ],
+    datas=[],
     hiddenimports=[
         'PyQt5.QtCore',
         'PyQt5.QtGui',

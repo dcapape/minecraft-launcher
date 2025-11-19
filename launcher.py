@@ -291,6 +291,9 @@ class LauncherWindow(QMainWindow):
         self.old_pos = None  # Para arrastrar la ventana
         self.title_bar = None  # Referencia a la barra de título
         
+        # Inicializar archivo de configuración si no existe
+        self.load_last_selected_version()
+        
         self.init_ui()
         self.load_saved_credentials()
     
@@ -638,7 +641,7 @@ class LauncherWindow(QMainWindow):
         self.version_combo.blockSignals(False)
     
     def save_selected_version(self, version: str):
-        """Guarda la versión seleccionada"""
+        """Guarda la versión seleccionada. Crea el archivo si no existe."""
         if not version or version == "No hay versiones disponibles":
             return
         
@@ -648,8 +651,12 @@ class LauncherWindow(QMainWindow):
             
             config = {}
             if CONFIG_FILE.exists():
-                with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
+                try:
+                    with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                        config = json.load(f)
+                except (json.JSONDecodeError, IOError):
+                    # Si el archivo está corrupto, empezar con configuración por defecto
+                    config = {}
             
             config['last_selected_version'] = version
             
@@ -659,12 +666,21 @@ class LauncherWindow(QMainWindow):
             print(f"Error guardando versión seleccionada: {e}")
     
     def load_last_selected_version(self) -> str:
-        """Carga la última versión seleccionada"""
+        """Carga la última versión seleccionada. Crea el archivo con valores por defecto si no existe."""
         try:
             import json
             from config import CONFIG_FILE
             
             if not CONFIG_FILE.exists():
+                # Crear archivo de configuración con valores por defecto
+                default_config = {
+                    "last_selected_version": None
+                }
+                try:
+                    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                        json.dump(default_config, f, indent=2)
+                except Exception as e:
+                    print(f"Error creando archivo de configuración: {e}")
                 return None
             
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
