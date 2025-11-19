@@ -6,9 +6,10 @@ import time
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QPushButton, QLabel, QLineEdit, 
                              QTextEdit, QMessageBox, QProgressBar, QDialog, QDialogButtonBox,
-                             QComboBox, QMenu)
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QUrl, QPoint
-from PyQt5.QtGui import QColor, QPainter, QPen, QBrush, QPixmap, QPalette
+                             QComboBox, QMenu, QGraphicsOpacityEffect)
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QUrl, QPoint, QPropertyAnimation, QEasingCurve
+from PyQt5.QtGui import QColor, QPainter, QPen, QBrush, QPixmap, QPalette, QRegion, QPainterPath
+from PyQt5.QtCore import QRect
 import requests
 from io import BytesIO
 from typing import Optional
@@ -435,44 +436,56 @@ class LauncherWindow(QMainWindow):
         
         # Aplicar imagen de fondo con transparencia
         self._bg_label = None
+        self._bg_animation = None
+        self._current_bg_type = "default"  # default, custom, snapshot
+        
+        # Crear el label de fondo primero
         if os.path.exists(bg_image_path):
-            # Cargar la imagen y aplicarla con transparencia usando un QLabel de fondo
             self._bg_label = QLabel(central_widget)
             self._bg_label.setAlignment(Qt.AlignCenter)
             self._bg_label.setAttribute(Qt.WA_TransparentForMouseEvents)  # No interceptar eventos del mouse
-            pixmap = QPixmap(bg_image_path)
-            if not pixmap.isNull():
-                # Crear una versión semitransparente de la imagen mezclada con el color de fondo
-                transparent_pixmap = QPixmap(pixmap.size())
-                transparent_pixmap.fill(Qt.transparent)
-                painter = QPainter(transparent_pixmap)
-                painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
-                painter.setOpacity(0.4)  # 40% de opacidad (ajustable: 0.0 = invisible, 1.0 = opaco)
-                painter.drawPixmap(0, 0, pixmap)
-                painter.end()
-                self._bg_label.setPixmap(transparent_pixmap)
-                self._bg_label.setScaledContents(True)
-                self._bg_label.lower()  # Enviar al fondo
-                
-                # Función para redimensionar el label de fondo cuando cambie el tamaño del widget
-                def update_bg_label_size():
-                    if self._bg_label:
-                        self._bg_label.setGeometry(0, 0, central_widget.width(), central_widget.height())
-                
-                # Guardar referencia para poder actualizarla después
-                self._update_bg_label_size = update_bg_label_size
-                
-                # Conectar el resize del widget central para actualizar el label de fondo
-                original_resize = central_widget.resizeEvent
-                def resize_with_bg(event):
-                    update_bg_label_size()
-                    if original_resize:
-                        original_resize(event)
-                central_widget.resizeEvent = resize_with_bg
-                
-                # Establecer tamaño inicial después de que el widget esté completamente inicializado
-                QApplication.processEvents()
+            self._bg_label.setScaledContents(True)
+            self._bg_label.lower()  # Enviar al fondo
+            
+            # Función para redimensionar el label de fondo y aplicar máscara redondeada
+            def update_bg_label_size():
+                if self._bg_label:
+                    self._bg_label.setGeometry(0, 0, central_widget.width(), central_widget.height())
+                    # Aplicar máscara redondeada para respetar los bordes del widget central
+                    radius = 15  # Mismo radio que el border-radius del widget central
+                    # Crear path redondeado
+                    path = QPainterPath()
+                    path.addRoundedRect(0, 0, central_widget.width(), central_widget.height(), radius, radius)
+                    # Convertir path a región: toFillPolygon devuelve QPolygonF, necesitamos QPolygon
+                    from PyQt5.QtGui import QPolygon
+                    from PyQt5.QtCore import QPoint
+                    polygonF = path.toFillPolygon()
+                    # Convertir QPolygonF a QPolygon (enteros)
+                    polygon = QPolygon([QPoint(int(p.x()), int(p.y())) for p in polygonF])
+                    region = QRegion(polygon)
+                    self._bg_label.setMask(region)
+            
+            # Guardar referencia para poder actualizarla después
+            self._update_bg_label_size = update_bg_label_size
+            
+            # Conectar el resize del widget central para actualizar el label de fondo
+            original_resize = central_widget.resizeEvent
+            def resize_with_bg(event):
                 update_bg_label_size()
+                if original_resize:
+                    original_resize(event)
+            central_widget.resizeEvent = resize_with_bg
+            
+            # Establecer tamaño inicial después de que el widget esté completamente inicializado
+            QApplication.processEvents()
+            update_bg_label_size()
+        
+        # Método para cargar imagen de fondo (debe definirse después de crear _bg_label)
+        self._load_background_image = self._create_bg_loader()
+        
+        # Cargar la imagen de fondo por defecto
+        if self._bg_label:
+            self._load_background_image("default")
         
         # Aplicar estilos base
         base_style = """
@@ -972,10 +985,18 @@ class LauncherWindow(QMainWindow):
                 index = version_to_index[last_version]
                 self.version_combo.setCurrentIndex(index)
                 self.add_message(f"Versión restaurada: {last_version}")
+                # Actualizar el fondo según la versión restaurada
+                display_name = self.version_combo.currentText()
+                self._update_background_for_version(last_version, display_name)
             else:
                 # Si no hay versión guardada o no está disponible, seleccionar la primera
                 if last_version:
                     self.add_message(f"Versión guardada '{last_version}' no está disponible, seleccionando primera versión")
+                # Actualizar el fondo para la primera versión seleccionada
+                if organized_versions:
+                    first_version_id = organized_versions[0][1]
+                    first_display_name = organized_versions[0][0]
+                    self._update_background_for_version(first_version_id, first_display_name)
             self.version_combo.setEnabled(True)
         else:
             self.version_combo.addItem("No hay versiones disponibles")
@@ -1035,10 +1056,18 @@ class LauncherWindow(QMainWindow):
                 index = version_to_index[last_version]
                 self.version_combo.setCurrentIndex(index)
                 self.add_message(f"Versión restaurada: {last_version}")
+                # Actualizar el fondo según la versión restaurada
+                display_name = self.version_combo.currentText()
+                self._update_background_for_version(last_version, display_name)
             else:
                 # Si no hay versión guardada o no está disponible, seleccionar la primera
                 if last_version:
                     self.add_message(f"Versión guardada '{last_version}' no está disponible, seleccionando primera versión")
+                # Actualizar el fondo para la primera versión seleccionada
+                if organized_versions:
+                    first_version_id = organized_versions[0][1]
+                    first_display_name = organized_versions[0][0]
+                    self._update_background_for_version(first_version_id, first_display_name)
             self.version_combo.setEnabled(True)
         else:
             self.version_combo.clear()
@@ -1238,6 +1267,9 @@ class LauncherWindow(QMainWindow):
             self.java_required_label.setText("")
             return
         
+        # Detectar tipo de versión y cambiar fondo si es necesario
+        self._update_background_for_version(version_id, version_name)
+        
         # Cargar el JSON de la versión para obtener los requisitos de Java
         version_json = self.minecraft_launcher._load_version_json(version_id)
         if version_json:
@@ -1285,6 +1317,137 @@ class LauncherWindow(QMainWindow):
     def add_message(self, message: str):
         """Añade un mensaje al área de mensajes"""
         self.message_area.append(f"[{time.strftime('%H:%M:%S')}] {message}")
+    
+    def _create_bg_loader(self):
+        """Crea la función para cargar imágenes de fondo"""
+        def load_bg_image(bg_type: str):
+            """Carga una imagen de fondo con transparencia"""
+            if not hasattr(self, '_bg_label') or not self._bg_label:
+                return
+            
+            # Determinar qué imagen cargar
+            if bg_type == "custom":
+                bg_file = "custom.png"
+            elif bg_type == "snapshot":
+                bg_file = "snapshot.png"
+            else:  # default
+                bg_file = "default.png"
+            
+            bg_image_path = os.path.join(os.path.dirname(__file__), "assets", bg_file)
+            if not os.path.exists(bg_image_path):
+                bg_image_path = os.path.join("assets", bg_file)
+            
+            if not os.path.exists(bg_image_path):
+                print(f"[WARN] No se encontró imagen de fondo: {bg_file}")
+                return
+            
+            pixmap = QPixmap(bg_image_path)
+            if pixmap.isNull():
+                return
+            
+            # Crear una versión semitransparente de la imagen
+            transparent_pixmap = QPixmap(pixmap.size())
+            transparent_pixmap.fill(Qt.transparent)
+            painter = QPainter(transparent_pixmap)
+            painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+            painter.setOpacity(0.4)  # 40% de opacidad
+            painter.drawPixmap(0, 0, pixmap)
+            painter.end()
+            
+            # Si es el mismo tipo, solo actualizar sin animación
+            if self._current_bg_type == bg_type:
+                self._bg_label.setPixmap(transparent_pixmap)
+                # Asegurar que la opacidad esté al 100%
+                effect = self._bg_label.graphicsEffect()
+                if effect and isinstance(effect, QGraphicsOpacityEffect):
+                    effect.setOpacity(1.0)
+                return
+            
+            # Cambiar fondo con animación fadeIn
+            self._change_background_with_fade(transparent_pixmap)
+            self._current_bg_type = bg_type
+        
+        return load_bg_image
+    
+    def _change_background_with_fade(self, new_pixmap: QPixmap):
+        """Cambia el fondo con animación fadeIn"""
+        if not hasattr(self, '_bg_label') or not self._bg_label:
+            return
+        
+        # Detener animación anterior si existe
+        if hasattr(self, '_bg_animation') and self._bg_animation and self._bg_animation.state() == QPropertyAnimation.Running:
+            self._bg_animation.stop()
+        
+        # Usar QGraphicsOpacityEffect para la animación de opacidad
+        opacity_effect = QGraphicsOpacityEffect()
+        self._bg_label.setGraphicsEffect(opacity_effect)
+        
+        # Cambiar la imagen primero
+        self._bg_label.setPixmap(new_pixmap)
+        
+        # Crear nueva animación de opacidad
+        self._bg_animation = QPropertyAnimation(opacity_effect, b"opacity")
+        self._bg_animation.setDuration(500)  # 500ms para el fade
+        self._bg_animation.setEasingCurve(QEasingCurve.InOutQuad)
+        
+        # Configurar valores de la animación
+        self._bg_animation.setStartValue(0.0)
+        self._bg_animation.setEndValue(1.0)
+        
+        # Iniciar animación
+        self._bg_animation.start()
+    
+    def _update_background_for_version(self, version_id: str, version_name: str):
+        """Actualiza el fondo según el tipo de versión seleccionada"""
+        if not hasattr(self, '_load_background_image'):
+            return
+        
+        # Determinar tipo de versión
+        bg_type = "default"
+        
+        # Verificar si es snapshot (puede estar en el nombre o en el tipo del JSON)
+        is_snapshot = False
+        if "snapshot" in version_id.lower() or "snapshot" in version_name.lower():
+            is_snapshot = True
+        else:
+            # Verificar en el JSON si el tipo es "snapshot"
+            try:
+                json_path = os.path.join(
+                    self.minecraft_launcher.minecraft_path,
+                    "versions",
+                    version_id,
+                    f"{version_id}.json"
+                )
+                if os.path.exists(json_path):
+                    with open(json_path, 'r', encoding='utf-8') as f:
+                        version_json_original = json.load(f)
+                    if version_json_original.get("type", "").lower() == "snapshot":
+                        is_snapshot = True
+            except Exception:
+                pass  # Si hay error, continuar
+        
+        if is_snapshot:
+            bg_type = "snapshot"
+        else:
+            # Verificar si es custom (tiene inheritsFrom)
+            try:
+                json_path = os.path.join(
+                    self.minecraft_launcher.minecraft_path,
+                    "versions",
+                    version_id,
+                    f"{version_id}.json"
+                )
+                if os.path.exists(json_path):
+                    with open(json_path, 'r', encoding='utf-8') as f:
+                        version_json_original = json.load(f)
+                    if version_json_original.get("inheritsFrom"):
+                        bg_type = "custom"
+            except Exception:
+                pass  # Si hay error, usar default
+        
+        # Cambiar fondo si es diferente
+        if bg_type != self._current_bg_type:
+            self._load_background_image(bg_type)
     
     def start_authentication(self):
         """Inicia el proceso de autenticación"""

@@ -1470,6 +1470,25 @@ class MinecraftLauncher:
         try:
             # Directorio base para nativos temporales
             bin_base = os.path.join(self.minecraft_path, "bin")
+            
+            # Limpiar la carpeta bin antes de crear el nuevo directorio
+            if os.path.exists(bin_base):
+                print(f"[INFO] Limpiando carpeta bin antes de extraer nativos...")
+                try:
+                    # Eliminar todos los subdirectorios y archivos en bin
+                    for item in os.listdir(bin_base):
+                        item_path = os.path.join(bin_base, item)
+                        try:
+                            if os.path.isdir(item_path):
+                                shutil.rmtree(item_path)
+                            else:
+                                os.remove(item_path)
+                        except Exception as e:
+                            print(f"[WARN] No se pudo eliminar {item_path}: {e}")
+                    print(f"[INFO] Carpeta bin limpiada correctamente")
+                except Exception as e:
+                    print(f"[WARN] Error al limpiar carpeta bin: {e}")
+            
             os.makedirs(bin_base, exist_ok=True)
             
             # Generar hash único para esta sesión
