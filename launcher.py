@@ -8,10 +8,12 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QTextEdit, QMessageBox, QProgressBar, QDialog, QDialogButtonBox,
                              QComboBox, QMenu)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QUrl, QPoint
-from PyQt5.QtGui import QColor, QPainter, QPen, QBrush, QPixmap
+from PyQt5.QtGui import QColor, QPainter, QPen, QBrush, QPixmap, QPalette
 import requests
 from io import BytesIO
 from typing import Optional
+import os
+import json
 from java_downloader import JavaDownloader
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 import webbrowser
@@ -425,8 +427,68 @@ class LauncherWindow(QMainWindow):
         central_widget.setObjectName("centralWidget")
         self.setCentralWidget(central_widget)
         
-        # Aplicar estilos gaming morados
-        self.setStyleSheet("""
+        # Cargar imagen de fondo
+        bg_image_path = os.path.join(os.path.dirname(__file__), "assets", "default.png")
+        if not os.path.exists(bg_image_path):
+            # Intentar ruta relativa desde el directorio base
+            bg_image_path = os.path.join("assets", "default.png")
+        
+        # Aplicar imagen de fondo con transparencia
+        self._bg_label = None
+        if os.path.exists(bg_image_path):
+            # Cargar la imagen y aplicarla con transparencia usando un QLabel de fondo
+            self._bg_label = QLabel(central_widget)
+            self._bg_label.setAlignment(Qt.AlignCenter)
+            self._bg_label.setAttribute(Qt.WA_TransparentForMouseEvents)  # No interceptar eventos del mouse
+            pixmap = QPixmap(bg_image_path)
+            if not pixmap.isNull():
+                # Crear una versión semitransparente de la imagen mezclada con el color de fondo
+                transparent_pixmap = QPixmap(pixmap.size())
+                transparent_pixmap.fill(Qt.transparent)
+                painter = QPainter(transparent_pixmap)
+                painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+                painter.setOpacity(0.4)  # 40% de opacidad (ajustable: 0.0 = invisible, 1.0 = opaco)
+                painter.drawPixmap(0, 0, pixmap)
+                painter.end()
+                self._bg_label.setPixmap(transparent_pixmap)
+                self._bg_label.setScaledContents(True)
+                self._bg_label.lower()  # Enviar al fondo
+                
+                # Función para redimensionar el label de fondo cuando cambie el tamaño del widget
+                def update_bg_label_size():
+                    if self._bg_label:
+                        self._bg_label.setGeometry(0, 0, central_widget.width(), central_widget.height())
+                
+                # Guardar referencia para poder actualizarla después
+                self._update_bg_label_size = update_bg_label_size
+                
+                # Conectar el resize del widget central para actualizar el label de fondo
+                original_resize = central_widget.resizeEvent
+                def resize_with_bg(event):
+                    update_bg_label_size()
+                    if original_resize:
+                        original_resize(event)
+                central_widget.resizeEvent = resize_with_bg
+                
+                # Establecer tamaño inicial después de que el widget esté completamente inicializado
+                QApplication.processEvents()
+                update_bg_label_size()
+        
+        # Aplicar estilos base
+        base_style = """
+            QMainWindow {
+                background: transparent;
+            }
+            #centralWidget {
+                background-color: #1a0d2e;
+                border-radius: 15px;
+                border: 2px solid #8b5cf6;
+            }
+        """
+        
+        # Si no hay imagen, aplicar el gradiente
+        if not os.path.exists(bg_image_path):
+            base_style = """
             QMainWindow {
                 background: transparent;
             }
@@ -436,6 +498,9 @@ class LauncherWindow(QMainWindow):
                 border-radius: 15px;
                 border: 2px solid #8b5cf6;
             }
+        """
+        
+        self.setStyleSheet(base_style + """
             QLabel {
                 color: #e9d5ff;
                 background: transparent;
@@ -528,7 +593,7 @@ class LauncherWindow(QMainWindow):
                 selection-background-color: #7c3aed;
             }
             QTextEdit {
-                background: #0f0a1a;
+                background: rgba(15, 10, 26, 0.7);
                 color: #e9d5ff;
                 border: 2px solid #6d28d9;
                 border-radius: 5px;
@@ -677,7 +742,7 @@ class LauncherWindow(QMainWindow):
         version_layout.addStretch()  # Empujar el combo a la derecha
         
         self.version_combo = QComboBox()
-        self.version_combo.setFixedSize(300, 40)  # Misma altura que los botones
+        self.version_combo.setFixedSize(400, 40)  # Misma altura que los botones
         self.version_combo.setStyleSheet("font-size: 14px;")  # Fuente más grande
         self.version_combo.currentTextChanged.connect(self.on_version_changed)
         self.version_combo.currentTextChanged.connect(self.save_selected_version)
@@ -708,7 +773,7 @@ class LauncherWindow(QMainWindow):
         java_layout.addStretch()  # Empujar el combo a la derecha
         
         self.java_combo = QComboBox()
-        self.java_combo.setFixedSize(300, 40)  # Misma altura que los botones
+        self.java_combo.setFixedSize(400, 40)  # Misma altura que los botones
         self.java_combo.setStyleSheet("font-size: 14px;")  # Fuente más grande
         java_layout.addWidget(self.java_combo)
         
@@ -778,6 +843,109 @@ class LauncherWindow(QMainWindow):
         self.load_versions_thread.error.connect(self.on_versions_error)
         self.load_versions_thread.start()
     
+    def _organize_versions_tree(self, versions):
+        """Organiza las versiones en un árbol jerárquico"""
+        vanilla_versions = {}  # {version_name: version_id}
+        custom_versions = {}  # {parent_version: [version_id, ...]}
+        snapshot_versions = {}  # {parent_version: [version_id, ...]}
+        orphan_snapshots = []  # [version_id, ...]
+        
+        # Analizar cada versión
+        for version_id in versions:
+            try:
+                # Leer el JSON original sin mergear para verificar inheritsFrom
+                json_path = os.path.join(
+                    self.minecraft_launcher.minecraft_path, 
+                    "versions", 
+                    version_id, 
+                    f"{version_id}.json"
+                )
+                
+                if not os.path.exists(json_path):
+                    continue
+                
+                with open(json_path, 'r', encoding='utf-8') as f:
+                    version_json_original = json.load(f)
+                
+                # Verificar si es snapshot
+                is_snapshot = (
+                    "snapshot" in version_id.lower() or
+                    version_json_original.get("type", "").lower() == "snapshot" or
+                    "snapshot" in version_json_original.get("id", "").lower()
+                )
+                
+                # Verificar si tiene herencia (del JSON original, no mergeado)
+                inherits_from = version_json_original.get("inheritsFrom")
+                
+                if is_snapshot:
+                    if inherits_from:
+                        # Snapshot con versión vanilla padre
+                        if inherits_from not in snapshot_versions:
+                            snapshot_versions[inherits_from] = []
+                        snapshot_versions[inherits_from].append(version_id)
+                    else:
+                        # Snapshot sin versión vanilla (huérfano)
+                        orphan_snapshots.append(version_id)
+                elif inherits_from:
+                    # Versión custom (neoforge, forge, etc.) - NO es vanilla
+                    if inherits_from not in custom_versions:
+                        custom_versions[inherits_from] = []
+                    custom_versions[inherits_from].append(version_id)
+                else:
+                    # Versión vanilla (sin inheritsFrom y no snapshot)
+                    vanilla_versions[version_id] = version_id
+            except Exception as e:
+                # Si hay error, tratar como vanilla por defecto
+                print(f"Error analizando versión {version_id}: {e}")
+                vanilla_versions[version_id] = version_id
+        
+        # Ordenar versiones vanilla (por número de versión, descendente)
+        def version_sort_key(v):
+            # Extraer números de versión para ordenar correctamente
+            parts = v.split('.')
+            try:
+                major = int(parts[0]) if len(parts) > 0 and parts[0].isdigit() else 0
+                minor = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+                patch = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+                return (major, minor, patch)
+            except:
+                return (0, 0, 0)
+        
+        sorted_vanilla = sorted(vanilla_versions.keys(), key=version_sort_key, reverse=True)
+        
+        # Construir lista ordenada en árbol
+        organized = []
+        version_to_index = {}  # Para mapear version_id a índice en el combo
+        
+        # Agregar versiones vanilla con sus hijos
+        for vanilla_id in sorted_vanilla:
+            # Agregar versión vanilla
+            display_name = f"Vanilla {vanilla_id}"
+            organized.append((display_name, vanilla_id))
+            version_to_index[vanilla_id] = len(organized) - 1
+            
+            # Agregar versiones custom hijas
+            if vanilla_id in custom_versions:
+                for custom_id in sorted(custom_versions[vanilla_id]):
+                    display_name = f"  - Custom {custom_id}"
+                    organized.append((display_name, custom_id))
+                    version_to_index[custom_id] = len(organized) - 1
+            
+            # Agregar snapshots hijas
+            if vanilla_id in snapshot_versions:
+                for snapshot_id in sorted(snapshot_versions[vanilla_id]):
+                    display_name = f"  - Snapshot {snapshot_id}"
+                    organized.append((display_name, snapshot_id))
+                    version_to_index[snapshot_id] = len(organized) - 1
+        
+        # Agregar snapshots huérfanos al final
+        for snapshot_id in sorted(orphan_snapshots):
+            display_name = f"Snapshot {snapshot_id}"
+            organized.append((display_name, snapshot_id))
+            version_to_index[snapshot_id] = len(organized) - 1
+        
+        return organized, version_to_index
+    
     def on_versions_loaded(self, versions):
         """Se llama cuando las versiones se han cargado"""
         # Ocultar barra de progreso
@@ -789,16 +957,21 @@ class LauncherWindow(QMainWindow):
         self.version_combo.clear()
         
         if versions:
-            self.version_combo.addItems(versions)
+            # Organizar versiones en árbol
+            organized_versions, version_to_index = self._organize_versions_tree(versions)
+            
+            # Agregar versiones organizadas al combo
+            for display_name, version_id in organized_versions:
+                self.version_combo.addItem(display_name, version_id)
+            
             self.add_message(f"Versiones de Minecraft disponibles: {len(versions)} (solo descargadas)")
             
             # Cargar la última versión seleccionada
             last_version = self.load_last_selected_version()
-            if last_version and last_version in versions:
-                index = self.version_combo.findText(last_version)
-                if index >= 0:
-                    self.version_combo.setCurrentIndex(index)
-                    self.add_message(f"Versión restaurada: {last_version}")
+            if last_version and last_version in version_to_index:
+                index = version_to_index[last_version]
+                self.version_combo.setCurrentIndex(index)
+                self.add_message(f"Versión restaurada: {last_version}")
             else:
                 # Si no hay versión guardada o no está disponible, seleccionar la primera
                 if last_version:
@@ -846,16 +1019,22 @@ class LauncherWindow(QMainWindow):
         
         if versions:
             self.version_combo.clear()
-            self.version_combo.addItems(versions)
+            
+            # Organizar versiones en árbol
+            organized_versions, version_to_index = self._organize_versions_tree(versions)
+            
+            # Agregar versiones organizadas al combo
+            for display_name, version_id in organized_versions:
+                self.version_combo.addItem(display_name, version_id)
+            
             self.add_message(f"Versiones de Minecraft disponibles: {len(versions)} (solo descargadas)")
             
             # Cargar la última versión seleccionada
             last_version = self.load_last_selected_version()
-            if last_version and last_version in versions:
-                index = self.version_combo.findText(last_version)
-                if index >= 0:
-                    self.version_combo.setCurrentIndex(index)
-                    self.add_message(f"Versión restaurada: {last_version}")
+            if last_version and last_version in version_to_index:
+                index = version_to_index[last_version]
+                self.version_combo.setCurrentIndex(index)
+                self.add_message(f"Versión restaurada: {last_version}")
             else:
                 # Si no hay versión guardada o no está disponible, seleccionar la primera
                 if last_version:
@@ -872,6 +1051,12 @@ class LauncherWindow(QMainWindow):
     
     def save_selected_version(self, version: str):
         """Guarda la versión seleccionada. Crea el archivo si no existe."""
+        # Obtener el ID real de la versión (sin prefijos)
+        version_id = self.version_combo.currentData()
+        if not version_id:
+            # Fallback: usar el texto si no hay data
+            version_id = version
+        
         # No guardar valores temporales o inválidos
         invalid_values = [
             "No hay versiones disponibles",
@@ -880,7 +1065,7 @@ class LauncherWindow(QMainWindow):
             "Error cargando versiones"
         ]
         
-        if not version or version in invalid_values:
+        if not version_id or version_id in invalid_values:
             return
         
         try:
@@ -896,7 +1081,7 @@ class LauncherWindow(QMainWindow):
                     # Si el archivo está corrupto, empezar con configuración por defecto
                     config = {}
             
-            config['last_selected_version'] = version
+            config['last_selected_version'] = version_id
             
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(config, f, indent=2)
@@ -1043,12 +1228,18 @@ class LauncherWindow(QMainWindow):
     
     def on_version_changed(self, version_name: str):
         """Se llama cuando cambia la versión de Minecraft seleccionada"""
-        if not version_name or version_name == "No hay versiones disponibles":
+        # Obtener el ID real de la versión (sin prefijos)
+        version_id = self.version_combo.currentData()
+        if not version_id:
+            # Fallback: intentar extraer del texto si no hay data
+            version_id = version_name
+        
+        if not version_id or version_id == "No hay versiones disponibles":
             self.java_required_label.setText("")
             return
         
         # Cargar el JSON de la versión para obtener los requisitos de Java
-        version_json = self.minecraft_launcher._load_version_json(version_name)
+        version_json = self.minecraft_launcher._load_version_json(version_id)
         if version_json:
             required_java = self.minecraft_launcher.get_required_java_version(version_json)
             if required_java:
@@ -1197,8 +1388,11 @@ class LauncherWindow(QMainWindow):
             )
             return
         
-        # Obtener la versión seleccionada
-        selected_version = self.version_combo.currentText()
+        # Obtener la versión seleccionada (ID real, sin prefijos)
+        selected_version = self.version_combo.currentData()
+        if not selected_version:
+            # Fallback: usar el texto si no hay data
+            selected_version = self.version_combo.currentText()
         if not selected_version or selected_version == "No hay versiones disponibles":
             QMessageBox.warning(self, "Error", "Por favor, selecciona una versión de Minecraft")
             return
