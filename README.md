@@ -44,7 +44,7 @@ source .venv/bin/activate
 
 **Note**: If `python` points to Python 2.7 on your system, use `python3` instead.
 
-### 3. Install dependencies
+### 3. Install dependencies 
 
 ```bash
 # Make sure you're using Python 3
