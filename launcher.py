@@ -522,7 +522,6 @@ class LauncherWindow(QMainWindow):
                 color: #c084fc;
                 font-size: 28px;
                 font-weight: bold;
-                text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.8);
             }
             QPushButton {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -704,7 +703,6 @@ class LauncherWindow(QMainWindow):
             }
             QLabel#userNameLabel:hover {
                 background: rgba(139, 92, 246, 0.3);
-                cursor: pointer;
             }
         """)
         self.user_name_label.setCursor(Qt.PointingHandCursor)
@@ -1522,23 +1520,39 @@ class LauncherWindow(QMainWindow):
         if self.credential_storage.has_credentials():
             credentials = self.credential_storage.load_credentials()
             if credentials:
+                username = credentials.get("username", "Usuario")
                 # Verificar si el token sigue siendo válido
                 expires_at = credentials.get("expires_at", 0)
                 if time.time() < expires_at:
-                    username = credentials.get("username", "Usuario")
+                    # Token válido
                     self.update_user_widget(credentials)
                     # Habilitar el botón de lanzar cuando hay sesión
                     self.launch_button.setEnabled(True)
                     self.add_message(f"Credenciales cargadas para: {username}")
                 else:
-                    self.add_message("Las credenciales han expirado. Por favor, inicia sesión nuevamente.")
-                    self.update_user_widget(None)
+                    # Token expirado, pero mostrar usuario de todas formas
+                    # La reautenticación se pedirá al intentar lanzar
+                    self.update_user_widget(credentials)
+                    self.add_message(f"Credenciales cargadas para: {username} (sesión expirada, se pedirá reautenticación al lanzar)")
+                    # El botón se habilitará igual, pero pedirá reautenticación al lanzar
+                    self.launch_button.setEnabled(True)
+            else:
+                self.add_message("Error cargando credenciales guardadas")
+                self.update_user_widget(None)
     
     def launch_minecraft(self):
         """Lanza Minecraft con las credenciales guardadas"""
         credentials = self.credential_storage.load_credentials()
         if not credentials:
             # Si no hay credenciales, iniciar sesión automáticamente
+            self.start_authentication()
+            return
+        
+        # Verificar si el token ha expirado
+        expires_at = credentials.get("expires_at", 0)
+        if time.time() >= expires_at:
+            # Token expirado, pedir reautenticación
+            self.add_message("La sesión ha expirado. Por favor, inicia sesión nuevamente.")
             self.start_authentication()
             return
         
@@ -1783,7 +1797,6 @@ class LauncherWindow(QMainWindow):
                 }
                 QLabel#userNameLabel:hover {
                     background: rgba(139, 92, 246, 0.3);
-                    cursor: pointer;
                 }
             """)
             
@@ -1803,11 +1816,11 @@ class LauncherWindow(QMainWindow):
                 }
                 QLabel#userNameLabel:hover {
                     background: rgba(139, 92, 246, 0.3);
-                    cursor: pointer;
                 }
             """)
             self.user_avatar_label.setVisible(False)
             self.user_avatar_label.clear()
+            self.user_name_label.setCursor(Qt.PointingHandCursor)
     
     def _load_user_avatar(self, uuid: str):
         """Carga el avatar del jugador desde la API de Minecraft"""
