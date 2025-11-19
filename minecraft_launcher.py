@@ -450,7 +450,7 @@ class MinecraftLauncher:
                                     if not jar_path_real.startswith(libraries_dir_real):
                                         print(f"[SKIP] JAR fuera del directorio de librerías: {jar_path}")
                                         continue
-                                    
+                                
                                     # CRÍTICO: Usar ruta real para detectar duplicados (case-insensitive en Windows)
                                     # El launcher oficial elimina duplicados: si el mismo JAR aparece varias veces,
                                     # solo se incluye la primera instancia
@@ -458,7 +458,7 @@ class MinecraftLauncher:
                                     if jar_key in seen_jars:
                                         print(f"[SKIP] JAR duplicado omitido en module path: {os.path.basename(jar_path)}")
                                         continue
-                                    
+                                
                                     seen_jars.add(jar_key)
                                     
                                     # Convertir a forward slash para module path (como otros launchers)
@@ -963,14 +963,24 @@ class MinecraftLauncher:
             traceback.print_exc()
             return False, None
     
-    def is_version_downloaded(self, version: str) -> bool:
-        """Verifica si una versión está completamente descargada"""
+    def is_version_downloaded(self, version: str, strict: bool = True) -> bool:
+        """Verifica si una versión está completamente descargada
+        
+        Args:
+            version: ID de la versión
+            strict: Si es True, requiere que las librerías estén descargadas.
+                    Si es False, solo requiere JSON y JAR (útil para versiones recién descargadas)
+        """
         version_dir = os.path.join(self.minecraft_path, "versions", version)
         json_path = os.path.join(version_dir, f"{version}.json")
         jar_path = os.path.join(version_dir, f"{version}.jar")
         
         if not os.path.exists(json_path) or not os.path.exists(jar_path):
             return False
+        
+        # Si no es estricto, solo verificar que existan JSON y JAR
+        if not strict:
+            return True
         
         # Cargar JSON y verificar librerías críticas
         try:
@@ -1009,8 +1019,14 @@ class MinecraftLauncher:
             return True
         return libraries_found >= (libraries_required * 0.8)
     
-    def get_available_versions(self, only_downloaded: bool = True) -> list:
-        """Obtiene todas las versiones de Minecraft disponibles"""
+    def get_available_versions(self, only_downloaded: bool = True, strict_check: bool = True) -> list:
+        """Obtiene todas las versiones de Minecraft disponibles
+        
+        Args:
+            only_downloaded: Si es True, solo incluye versiones descargadas
+            strict_check: Si es True, requiere que las librerías estén descargadas.
+                         Si es False, solo requiere JSON y JAR (útil para versiones recién descargadas)
+        """
         versions_dir = os.path.join(self.minecraft_path, "versions")
         if not os.path.exists(versions_dir):
             return []
@@ -1023,7 +1039,7 @@ class MinecraftLauncher:
                 if os.path.exists(json_path):
                     # Si only_downloaded es True, verificar que esté descargada
                     if only_downloaded:
-                        if self.is_version_downloaded(item):
+                        if self.is_version_downloaded(item, strict=strict_check):
                             versions.append(item)
                     else:
                         versions.append(item)
@@ -1067,7 +1083,9 @@ class MinecraftLauncher:
         # Si tiene herencia, cargar la versión padre primero
         if "inheritsFrom" in version_json:
             parent_version = version_json["inheritsFrom"]
-            print(f"[INFO] Versión {version} hereda de {parent_version}")
+            # Mostrar mensaje solo durante el lanzamiento (cuando se necesita el merge completo)
+            # No mostrar durante la carga inicial de versiones (solo lectura de JSON)
+            print(f"[DEBUG] Versión {version} hereda de {parent_version}")
             
             parent_json = self._load_version_json_recursive(parent_version, visited.copy())
             if not parent_json:
@@ -1298,7 +1316,7 @@ class MinecraftLauncher:
                                 continue
                             seen_jars.add(jar_key)
                             classpath_parts.append(full_path_normalized)
-                            libraries_found += 1
+                        libraries_found += 1
                     else:
                         # Algunas librerías pueden no existir y eso está bien
                         pass
@@ -2162,8 +2180,8 @@ class MinecraftLauncher:
                 else:
                     # No tiene valor válido, omitirlo
                     print(f"[SKIP] Flag sin valor omitido: {arg}")
-                    i += 1
-                    continue
+                i += 1
+                continue
             
             # Detectar argumentos de quick play
             if isinstance(arg, str) and arg.startswith("--quickPlay"):

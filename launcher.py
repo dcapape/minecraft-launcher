@@ -3,10 +3,12 @@ Launcher principal de Minecraft Java Edition
 """
 import sys
 import time
+import platform
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QPushButton, QLabel, QLineEdit, 
                              QTextEdit, QMessageBox, QProgressBar, QDialog, QDialogButtonBox,
-                             QComboBox, QMenu, QGraphicsOpacityEffect)
+                             QComboBox, QMenu, QGraphicsOpacityEffect, QListWidget, QListWidgetItem,
+                             QCheckBox)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QUrl, QPoint, QPropertyAnimation, QEasingCurve
 from PyQt5.QtGui import QColor, QPainter, QPen, QBrush, QPixmap, QPalette, QRegion, QPainterPath
 from PyQt5.QtCore import QRect
@@ -35,7 +37,8 @@ class LoadVersionsThread(QThread):
     
     def run(self):
         try:
-            versions = self.minecraft_launcher.get_available_versions(only_downloaded=True)
+            # Usar strict_check=False para incluir versiones recién descargadas (solo con JSON y JAR)
+            versions = self.minecraft_launcher.get_available_versions(only_downloaded=True, strict_check=False)
             self.finished.emit(versions)
         except Exception as e:
             self.error.emit(str(e))
@@ -64,6 +67,226 @@ class JavaDownloadThread(QThread):
                 self.finished.emit(java_path)
             else:
                 self.error.emit("No se pudo descargar Java")
+        except Exception as e:
+            self.error.emit(str(e))
+
+class LoadVersionManifestThread(QThread):
+    """Thread para cargar el manifest de versiones desde Mojang"""
+    finished = pyqtSignal(dict)  # manifest completo
+    error = pyqtSignal(str)
+    
+    def run(self):
+        try:
+            response = requests.get("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json", timeout=30)
+            response.raise_for_status()
+            manifest = response.json()
+            self.finished.emit(manifest)
+        except Exception as e:
+            self.error.emit(str(e))
+
+class DownloadVersionThread(QThread):
+    """Thread para descargar una versión de Minecraft"""
+    progress = pyqtSignal(int, int, str)  # descargado, total, mensaje
+    finished = pyqtSignal(str)  # version_id
+    error = pyqtSignal(str)
+    
+    def __init__(self, version_id, version_url, minecraft_path):
+        super().__init__()
+        self.version_id = version_id
+        self.version_url = version_url
+        self.minecraft_path = minecraft_path
+        self.system = platform.system()
+    
+    def _should_include_library(self, library):
+        """Verifica si una librería debe incluirse según las reglas del OS"""
+        if "rules" not in library:
+            return True
+        
+        for rule in library.get("rules", []):
+            action = rule.get("action", "allow")
+            if "os" in rule:
+                os_rule = rule["os"]
+                os_name = os_rule.get("name", "").lower()
+                current_os = self.system.lower()
+                
+                # Mapear nombres de OS
+                if current_os == "windows":
+                    current_os = "windows"
+                elif current_os == "darwin":
+                    current_os = "osx"
+                elif current_os == "linux":
+                    current_os = "linux"
+                
+                if os_name and os_name != current_os:
+                    if action == "allow":
+                        return False
+                    continue
+            
+            if action == "disallow":
+                return False
+        
+        return True
+    
+    def _maven_name_to_path(self, name):
+        """Convierte un nombre Maven (group:artifact:version) a ruta de archivo"""
+        parts = name.split(':')
+        if len(parts) < 3:
+            return None
+        
+        group_id = parts[0].replace('.', '/')
+        artifact_id = parts[1]
+        version = parts[2]
+        
+        # Construir ruta: group/artifact/version/artifact-version.jar
+        path = f"{group_id}/{artifact_id}/{version}/{artifact_id}-{version}.jar"
+        return path
+    
+    def _download_library(self, library, libraries_dir, progress_base, progress_max):
+        """Descarga una librería individual"""
+        # Verificar reglas
+        if not self._should_include_library(library):
+            return True  # Librería excluida por reglas, no es un error
+        
+        # Obtener información de descarga
+        downloads = library.get("downloads", {})
+        artifact = downloads.get("artifact")
+        
+        if not artifact:
+            # Si no hay artifact en downloads, intentar construir desde name
+            lib_name = library.get("name", "")
+            if not lib_name:
+                return True  # No hay información de descarga, saltar
+            
+            # Construir path desde name
+            lib_path = self._maven_name_to_path(lib_name)
+            if not lib_path:
+                return True  # No se pudo construir path, saltar
+            
+            # Verificar si ya existe
+            full_path = os.path.join(libraries_dir, lib_path)
+            if os.path.exists(full_path):
+                return True  # Ya existe, no descargar
+            
+            # No hay URL disponible, no podemos descargarla
+            return True  # Saltar librerías sin URL
+        
+        # Obtener URL y path
+        lib_url = artifact.get("url")
+        lib_path = artifact.get("path")
+        
+        if not lib_url or not lib_path:
+            return True  # No hay URL o path, saltar
+        
+        # Verificar si ya existe
+        full_path = os.path.join(libraries_dir, lib_path)
+        if os.path.exists(full_path):
+            return True  # Ya existe, no descargar
+        
+        # Crear directorio si no existe
+        lib_dir = os.path.dirname(full_path)
+        os.makedirs(lib_dir, exist_ok=True)
+        
+        # Descargar la librería
+        try:
+            response = requests.get(lib_url, stream=True, timeout=60)
+            response.raise_for_status()
+            
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded = 0
+            
+            with open(full_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+            
+            return True
+        except Exception as e:
+            print(f"[WARN] Error descargando librería {lib_path}: {e}")
+            # Si falla, eliminar archivo parcial
+            if os.path.exists(full_path):
+                try:
+                    os.remove(full_path)
+                except:
+                    pass
+            return False  # Error al descargar
+    
+    def run(self):
+        try:
+            # Paso 1: Descargar el JSON de la versión
+            self.progress.emit(0, 100, f"Descargando JSON de {self.version_id}...")
+            response = requests.get(self.version_url, timeout=30)
+            response.raise_for_status()
+            version_json = response.json()
+            
+            # Paso 2: Crear directorio de la versión
+            version_dir = os.path.join(self.minecraft_path, "versions", self.version_id)
+            os.makedirs(version_dir, exist_ok=True)
+            
+            # Paso 3: Guardar el JSON
+            json_path = os.path.join(version_dir, f"{self.version_id}.json")
+            with open(json_path, 'w', encoding='utf-8') as f:
+                json.dump(version_json, f, indent=2)
+            
+            self.progress.emit(5, 100, f"JSON guardado. Descargando client.jar...")
+            
+            # Paso 4: Descargar el client.jar
+            downloads = version_json.get("downloads", {})
+            client_info = downloads.get("client")
+            if not client_info:
+                self.error.emit("No se encontró información del client.jar en el JSON")
+                return
+            
+            jar_url = client_info.get("url")
+            if not jar_url:
+                self.error.emit("No se encontró URL del client.jar")
+                return
+            
+            jar_path = os.path.join(version_dir, f"{self.version_id}.jar")
+            
+            # Descargar el JAR con progreso (5-30%)
+            response = requests.get(jar_url, stream=True, timeout=60)
+            response.raise_for_status()
+            
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded = 0
+            
+            with open(jar_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total_size > 0:
+                            percent = int((downloaded / total_size) * 25) + 5  # 5-30%
+                            self.progress.emit(percent, 100, f"Descargando client.jar: {downloaded / (1024*1024):.1f} MB / {total_size / (1024*1024):.1f} MB")
+            
+            self.progress.emit(30, 100, f"Client.jar descargado. Descargando librerías...")
+            
+            # Paso 5: Descargar todas las librerías
+            libraries_dir = os.path.join(self.minecraft_path, "libraries")
+            os.makedirs(libraries_dir, exist_ok=True)
+            
+            libraries = version_json.get("libraries", [])
+            total_libraries = len(libraries)
+            libraries_downloaded = 0
+            libraries_skipped = 0
+            libraries_errors = 0
+            
+            for idx, library in enumerate(libraries):
+                # Actualizar progreso (30-95%)
+                progress_percent = 30 + int((idx / total_libraries) * 65) if total_libraries > 0 else 30
+                lib_name = library.get("name", "desconocida")
+                self.progress.emit(progress_percent, 100, f"Descargando librerías ({idx + 1}/{total_libraries}): {lib_name.split(':')[-2] if ':' in lib_name else lib_name}")
+                
+                result = self._download_library(library, libraries_dir, 30, 95)
+                if result:
+                    libraries_downloaded += 1
+                else:
+                    libraries_errors += 1
+            
+            self.progress.emit(100, 100, f"Descarga completada ({libraries_downloaded} librerías)")
+            self.finished.emit(self.version_id)
+            
         except Exception as e:
             self.error.emit(str(e))
 
@@ -358,6 +581,437 @@ class RedirectUrlDialog(QDialog):
     def get_redirect_url(self):
         return self.redirect_url
 
+class VersionDownloadDialog(QDialog):
+    """Diálogo para seleccionar y descargar versiones de Minecraft"""
+    
+    def __init__(self, parent=None, minecraft_launcher=None):
+        super().__init__(parent)
+        self.minecraft_launcher = minecraft_launcher
+        self.selected_version = None
+        self.manifest_thread = None
+        self.download_thread = None
+        
+        self.setWindowTitle("Añadir Versión")
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.resize(600, 500)
+        self._center_on_parent_screen(parent)
+        
+        # Widget central
+        central_widget = QWidget()
+        central_widget.setObjectName("centralWidget")
+        
+        layout = QVBoxLayout()
+        layout.setContentsMargins(20, 5, 20, 5)
+        layout.setSpacing(10)
+        
+        # Barra de título
+        title_bar = TitleBar(self)
+        title_bar.setFixedHeight(35)
+        title_bar.setObjectName("titleBar")
+        title_bar_layout = QHBoxLayout()
+        title_bar_layout.setContentsMargins(10, 0, 10, 0)
+        title_bar_layout.setSpacing(5)
+        title_bar.setLayout(title_bar_layout)
+        
+        title = QLabel("Añadir Versión de Minecraft")
+        title.setObjectName("titleLabel")
+        title.setAlignment(Qt.AlignCenter)
+        title_bar_layout.addWidget(title, 1)
+        
+        minimize_btn = QPushButton("−")
+        minimize_btn.setObjectName("minimizeButton")
+        minimize_btn.clicked.connect(self.showMinimized)
+        title_bar_layout.addWidget(minimize_btn)
+        
+        close_btn = QPushButton("×")
+        close_btn.setObjectName("closeButton")
+        close_btn.clicked.connect(self.reject)
+        title_bar_layout.addWidget(close_btn)
+        
+        layout.addWidget(title_bar)
+        
+        # Label de estado
+        self.status_label = QLabel("Cargando versiones disponibles...")
+        self.status_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.status_label)
+        
+        # ListWidget de versiones (en vez de ComboBox)
+        self.version_list = QListWidget()
+        self.version_list.setEnabled(False)
+        self.version_list.setFont(self.version_list.font())  # Preparar para cambiar fuente
+        font = self.version_list.font()
+        font.setPointSize(font.pointSize() + 2)  # Aumentar fuente en 2 puntos
+        self.version_list.setFont(font)
+        layout.addWidget(self.version_list)
+        
+        # Checkbox para filtrar solo versiones estables
+        self.stable_only_checkbox = QCheckBox("Solo versiones estables")
+        self.stable_only_checkbox.setChecked(True)  # Marcado por defecto
+        self.stable_only_checkbox.setStyleSheet("""
+            QCheckBox {
+                color: #e9d5ff;
+                font-size: 12px;
+                padding: 5px;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border: 2px solid #6d28d9;
+                border-radius: 3px;
+                background: #1a0d2e;
+            }
+            QCheckBox::indicator:checked {
+                background: #7c3aed;
+                border-color: #8b5cf6;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #8b5cf6;
+            }
+        """)
+        self.stable_only_checkbox.stateChanged.connect(self.on_filter_changed)
+        layout.addWidget(self.stable_only_checkbox)
+        
+        # Guardar el manifest completo para poder filtrar
+        self.full_manifest = None
+        
+        # Botones
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        
+        cancel_button = QPushButton("Cancelar")
+        cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(cancel_button)
+        
+        self.download_button = QPushButton("Descargar")
+        self.download_button.setEnabled(False)
+        self.download_button.clicked.connect(self.start_download)
+        button_layout.addWidget(self.download_button)
+        
+        layout.addLayout(button_layout)
+        
+        central_widget.setLayout(layout)
+        
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.addWidget(central_widget)
+        self.setLayout(main_layout)
+        
+        # Aplicar estilos (mismo que RedirectUrlDialog)
+        self.setStyleSheet("""
+            QDialog {
+                background: transparent;
+            }
+            #centralWidget {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #1a0d2e, stop:0.5 #2d1b4e, stop:1 #1a0d2e);
+                border-radius: 15px;
+                border: 2px solid #8b5cf6;
+            }
+            #titleBar {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #2d1b4e, stop:1 #1a0d2e);
+                border-top-left-radius: 15px;
+                border-top-right-radius: 15px;
+                border-bottom: 1px solid #8b5cf6;
+            }
+            QLabel {
+                color: #e9d5ff;
+                background: transparent;
+            }
+            QLabel#titleLabel {
+                color: #c084fc;
+                font-size: 20px;
+                font-weight: bold;
+            }
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #7c3aed, stop:1 #5b21b6);
+                color: white;
+                border: 2px solid #8b5cf6;
+                border-radius: 8px;
+                padding: 10px 20px;
+                font-size: 14px;
+                font-weight: bold;
+                min-height: 30px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #8b5cf6, stop:1 #6d28d9);
+                border: 2px solid #a78bfa;
+            }
+            QPushButton:pressed {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #5b21b6, stop:1 #4c1d95);
+            }
+            QPushButton:disabled {
+                background: #3f3f3f;
+                color: #888888;
+                border: 2px solid #555555;
+            }
+            QPushButton#closeButton {
+                background: #dc2626;
+                border: 1px solid #ef4444;
+                border-radius: 3px;
+                min-width: 20px;
+                max-width: 20px;
+                min-height: 20px;
+                max-height: 20px;
+                font-size: 16px;
+                font-weight: bold;
+                padding: 0px;
+            }
+            QPushButton#closeButton:hover {
+                background: #ef4444;
+                border: 1px solid #f87171;
+            }
+            QPushButton#minimizeButton {
+                background: #6b7280;
+                border: 1px solid #9ca3af;
+                border-radius: 3px;
+                min-width: 20px;
+                max-width: 20px;
+                min-height: 20px;
+                max-height: 20px;
+                font-size: 16px;
+                font-weight: bold;
+                padding: 0px;
+            }
+            QPushButton#minimizeButton:hover {
+                background: #9ca3af;
+                border: 1px solid #d1d5db;
+            }
+            QListWidget {
+                background: #1a0d2e;
+                color: #e9d5ff;
+                border: 2px solid #6d28d9;
+                border-radius: 5px;
+                padding: 5px;
+            }
+            QListWidget:hover {
+                border: 2px solid #8b5cf6;
+            }
+            QListWidget::item {
+                padding: 8px;
+                border-bottom: 1px solid #3f3f3f;
+            }
+            QListWidget::item:selected {
+                background: #7c3aed;
+                color: white;
+            }
+            QListWidget::item:hover {
+                background: #6d28d9;
+            }
+        """)
+        
+        # Cargar manifest
+        self.load_manifest()
+    
+    def _center_on_parent_screen(self, parent):
+        """Centra la ventana en la pantalla donde está la ventana principal"""
+        if parent:
+            parent_geometry = parent.geometry()
+            parent_center = parent_geometry.center()
+            dialog_geometry = self.frameGeometry()
+            dialog_geometry.moveCenter(parent_center)
+            self.move(dialog_geometry.topLeft())
+        else:
+            from PyQt5.QtWidgets import QDesktopWidget
+            screen = QApplication.desktop().screenGeometry()
+            center_point = screen.center()
+            frame_geometry = self.frameGeometry()
+            frame_geometry.moveCenter(center_point)
+            self.move(frame_geometry.topLeft())
+    
+    def load_manifest(self):
+        """Carga el manifest de versiones desde Mojang"""
+        self.manifest_thread = LoadVersionManifestThread()
+        self.manifest_thread.finished.connect(self.on_manifest_loaded)
+        self.manifest_thread.error.connect(self.on_manifest_error)
+        self.manifest_thread.start()
+    
+    def on_manifest_loaded(self, manifest):
+        """Se llama cuando se carga el manifest"""
+        # Guardar el manifest completo para poder filtrar después
+        self.full_manifest = manifest
+        
+        # Aplicar filtro inicial
+        self._apply_version_filter()
+    
+    def _apply_version_filter(self):
+        """Aplica el filtro de versiones según el checkbox"""
+        if not self.full_manifest:
+            return
+        
+        # Obtener versiones ya descargadas
+        downloaded_versions = set()
+        if self.minecraft_launcher:
+            try:
+                downloaded = self.minecraft_launcher.get_available_versions(only_downloaded=True)
+                downloaded_versions = set(downloaded)
+            except:
+                pass
+        
+        # Filtrar versiones no descargadas
+        versions = self.full_manifest.get("versions", [])
+        available_versions = []
+        for version in versions:
+            version_id = version.get("id")
+            if version_id and version_id not in downloaded_versions:
+                # Aplicar filtro de versiones estables si el checkbox está marcado
+                if self.stable_only_checkbox.isChecked():
+                    version_type = version.get("type", "release")
+                    # Solo incluir versiones de tipo "release" (estables)
+                    if version_type == "release":
+                        available_versions.append(version)
+                else:
+                    # Incluir todas las versiones (release, snapshot, old_beta, old_alpha, etc.)
+                    available_versions.append(version)
+        
+        if not available_versions:
+            filter_text = "estables" if self.stable_only_checkbox.isChecked() else "disponibles"
+            self.status_label.setText(f"Todas las versiones {filter_text} ya están descargadas")
+            self.status_label.setStyleSheet("color: #fca5a5;")
+            self.version_list.clear()
+            self.version_list.setEnabled(False)
+            self.download_button.setEnabled(False)
+            return
+        
+        # Ordenar por fecha (más recientes primero)
+        available_versions.sort(key=lambda v: v.get("releaseTime", ""), reverse=True)
+        
+        # Agregar a la lista
+        self.version_list.clear()
+        for version in available_versions:
+            version_id = version.get("id")
+            version_type = version.get("type", "release")
+            display_name = f"{version_id} ({version_type})"
+            item = QListWidgetItem(display_name)
+            item.setData(Qt.UserRole, version)  # Guardar datos de la versión
+            self.version_list.addItem(item)
+        
+        self.version_list.setEnabled(True)
+        self.download_button.setEnabled(True)
+        filter_text = "estables" if self.stable_only_checkbox.isChecked() else "disponibles"
+        self.status_label.setText(f"{len(available_versions)} versiones {filter_text}")
+        self.status_label.setStyleSheet("color: #86efac;")
+    
+    def on_filter_changed(self, state):
+        """Se llama cuando cambia el estado del checkbox de filtro"""
+        print(f"[INFO] Filtro de versiones estables: {'activado' if state == Qt.Checked else 'desactivado'}")
+        self._apply_version_filter()
+    
+    def on_manifest_error(self, error):
+        """Se llama cuando hay un error cargando el manifest"""
+        self.status_label.setText(f"Error cargando versiones: {error}")
+        self.status_label.setStyleSheet("color: #fca5a5;")
+    
+    def start_download(self):
+        """Inicia la descarga de la versión seleccionada"""
+        current_item = self.version_list.currentItem()
+        if not current_item:
+            QMessageBox.warning(self, "Error", "Por favor selecciona una versión")
+            return
+        
+        version_data = current_item.data(Qt.UserRole)
+        if not version_data:
+            return
+        
+        version_id = version_data.get("id")
+        version_url = version_data.get("url")
+        
+        if not version_id or not version_url:
+            QMessageBox.warning(self, "Error", "Versión inválida")
+            return
+        
+        print(f"[INFO] Iniciando descarga de versión: {version_id}")
+        
+        # Iniciar descarga ANTES de cerrar el diálogo
+        minecraft_path = self.minecraft_launcher.minecraft_path if self.minecraft_launcher else None
+        if not minecraft_path:
+            QMessageBox.warning(self, "Error", "No se pudo determinar la ruta de Minecraft")
+            return
+        
+        # Crear el thread ANTES de cerrar el diálogo
+        parent = self.parent()
+        if not parent:
+            QMessageBox.warning(self, "Error", "No se pudo obtener la ventana principal")
+            return
+        
+        # Crear el thread con el parent como padre para que no se destruya
+        self.download_thread = DownloadVersionThread(version_id, version_url, minecraft_path)
+        self.download_thread.setParent(parent)  # Establecer parent para que no se destruya
+        
+        # Conectar señales al parent (LauncherWindow) en lugar del diálogo
+        print(f"[INFO] Conectando señales del thread al parent")
+        self.download_thread.progress.connect(parent.on_version_download_progress)
+        self.download_thread.finished.connect(parent.on_version_download_finished)
+        self.download_thread.error.connect(parent.on_version_download_error)
+        
+        # Guardar referencia en el parent para que no se destruya
+        if hasattr(parent, 'version_download_thread'):
+            # Si hay un thread anterior, esperar a que termine o cancelarlo
+            if parent.version_download_thread and parent.version_download_thread.isRunning():
+                print(f"[WARN] Thread de descarga anterior aún en ejecución")
+        parent.version_download_thread = self.download_thread
+        
+        # NO conectar deleteLater aquí - el thread debe mantenerse vivo hasta que termine completamente
+        # La limpieza se hará en los métodos on_version_download_finished/error después de verificar que terminó
+        
+        # Guardar referencia al diálogo en el parent para poder cerrarlo cuando termine
+        if parent and hasattr(parent, 'version_download_dialog'):
+            parent.version_download_dialog = self
+        
+        # Iniciar el thread
+        self.download_thread.start()
+        print(f"[INFO] Thread de descarga iniciado")
+        
+        # Cerrar el diálogo inmediatamente después de iniciar el thread
+        # El thread continuará ejecutándose en segundo plano y mostrará el progreso en la ventana principal
+        print(f"[INFO] Cerrando diálogo, thread continuará en segundo plano descargando librerías")
+        self.accept()
+    
+    def on_download_progress(self, downloaded, total, message):
+        """Actualiza el progreso de la descarga"""
+        self.status_label.setText(message)
+        # Emitir señal al parent para actualizar su barra de progreso
+        if self.parent():
+            if hasattr(self.parent(), 'progress_bar'):
+                self.parent().progress_bar.setVisible(True)
+                self.parent().progress_bar.setRange(0, 100)
+                self.parent().progress_bar.setValue(downloaded)
+            if hasattr(self.parent(), 'progress_label'):
+                self.parent().progress_label.setVisible(True)
+                self.parent().progress_label.setText(message)
+    
+    def on_download_finished(self, version_id):
+        """Se llama cuando termina la descarga"""
+        self.selected_version = version_id
+        if self.parent():
+            if hasattr(self.parent(), 'progress_bar'):
+                self.parent().progress_bar.setVisible(False)
+            if hasattr(self.parent(), 'progress_label'):
+                self.parent().progress_label.setVisible(False)
+            if hasattr(self.parent(), 'add_message'):
+                self.parent().add_message(f"Versión {version_id} descargada correctamente")
+            # Refrescar la lista de versiones en el parent
+            if hasattr(self.parent(), 'load_versions_async'):
+                self.parent().load_versions_async()
+        # No llamar a self.accept() aquí porque la ventana ya se cerró al iniciar la descarga
+    
+    def on_download_error(self, error):
+        """Se llama cuando hay un error en la descarga"""
+        self.status_label.setText(f"Error: {error}")
+        self.status_label.setStyleSheet("color: #fca5a5;")
+        self.version_list.setEnabled(True)
+        self.download_button.setEnabled(True)
+        if self.parent():
+            if hasattr(self.parent(), 'progress_bar'):
+                self.parent().progress_bar.setVisible(False)
+            if hasattr(self.parent(), 'progress_label'):
+                self.parent().progress_label.setVisible(False)
+        QMessageBox.critical(self, "Error", f"No se pudo descargar la versión:\n{error}")
+
 class TitleBar(QWidget):
     """Barra de título personalizada que permite arrastrar la ventana"""
     
@@ -393,6 +1047,8 @@ class LauncherWindow(QMainWindow):
         self.auth_thread = None
         self.load_versions_thread = None
         self.java_download_thread = None
+        self.version_download_thread = None  # Thread para descargar versiones
+        self.version_download_dialog = None  # Referencia al diálogo de descarga de versiones
         self.old_pos = None  # Para arrastrar la ventana
         self.title_bar = None  # Referencia a la barra de título
         
@@ -755,16 +1411,15 @@ class LauncherWindow(QMainWindow):
         self.version_combo = QComboBox()
         self.version_combo.setFixedSize(400, 40)  # Misma altura que los botones
         self.version_combo.setStyleSheet("font-size: 14px;")  # Fuente más grande
-        self.version_combo.currentTextChanged.connect(self.on_version_changed)
-        self.version_combo.currentTextChanged.connect(self.save_selected_version)
+        # NO conectar signals aquí - se conectarán después de cargar las versiones
         version_layout.addWidget(self.version_combo)
         
-        refresh_button = QPushButton("🔄")
-        refresh_button.setToolTip("Actualizar lista de versiones")
-        refresh_button.clicked.connect(self.load_versions)
-        refresh_button.setFixedSize(40, 40)  # Misma altura que combo y label
-        refresh_button.setStyleSheet("font-size: 20px; padding: 5px;")
-        version_layout.addWidget(refresh_button)
+        add_version_button = QPushButton("+")
+        add_version_button.setToolTip("Añadir nueva versión")
+        add_version_button.clicked.connect(self.show_add_version_dialog)
+        add_version_button.setFixedSize(40, 40)  # Misma altura que combo y label
+        add_version_button.setStyleSheet("font-size: 24px; padding: 5px; font-weight: bold;")
+        version_layout.addWidget(add_version_button)
         
         layout.addLayout(version_layout)
         
@@ -808,13 +1463,18 @@ class LauncherWindow(QMainWindow):
         # Cargar versiones de Java inmediatamente (es rápido)
         self.load_java_versions()
         
-        # Conectar save_selected_version DESPUÉS de cargar las versiones
-        # para evitar que se guarde durante la carga inicial
-        self.version_combo.currentTextChanged.connect(self.save_selected_version)
+        # Bloquear signals antes de agregar el item temporal
+        self.version_combo.blockSignals(True)
         
         # Mostrar mensaje inicial mientras se cargan las versiones
         self.version_combo.addItem("Cargando versiones...")
         self.version_combo.setEnabled(False)
+        
+        # Conectar save_selected_version DESPUÉS de cargar las versiones
+        # para evitar que se guarde durante la carga inicial
+        self.version_combo.currentTextChanged.connect(self.save_selected_version)
+        
+        # Desbloquear signals después de conectar (las versiones se cargarán después)
         
         # Botón de lanzar
         button_layout = QHBoxLayout()
@@ -842,8 +1502,13 @@ class LauncherWindow(QMainWindow):
             self.minecraft_status.setText("✗ Minecraft no detectado")
             self.minecraft_status.setStyleSheet("color: red;")
     
-    def load_versions_async(self):
+    def load_versions_async(self, select_version=None):
         """Inicia la carga asíncrona de versiones de Minecraft"""
+        # Guardar la versión a seleccionar después de cargar
+        self._version_to_select = select_version
+        if select_version:
+            self._version_to_select_was_set = True  # Marcar que es una descarga nueva
+        
         # Mostrar barra de progreso
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)  # Modo indeterminado
@@ -965,6 +1630,21 @@ class LauncherWindow(QMainWindow):
         # Bloquear signals temporalmente para evitar que se guarde durante la carga
         self.version_combo.blockSignals(True)
         
+        # Conectar signals solo cuando ya tenemos versiones reales
+        # Desconectar primero si ya estaban conectados (por si acaso)
+        try:
+            self.version_combo.currentTextChanged.disconnect(self.on_version_changed)
+        except:
+            pass
+        try:
+            self.version_combo.currentTextChanged.disconnect(self.save_selected_version)
+        except:
+            pass
+        
+        # Conectar signals ahora
+        self.version_combo.currentTextChanged.connect(self.on_version_changed)
+        self.version_combo.currentTextChanged.connect(self.save_selected_version)
+        
         self.version_combo.clear()
         
         if versions:
@@ -977,24 +1657,55 @@ class LauncherWindow(QMainWindow):
             
             self.add_message(f"Versiones de Minecraft disponibles: {len(versions)} (solo descargadas)")
             
-            # Cargar la última versión seleccionada
-            last_version = self.load_last_selected_version()
-            if last_version and last_version in version_to_index:
-                index = version_to_index[last_version]
+            # Determinar qué versión seleccionar
+            version_to_select = None
+            if hasattr(self, '_version_to_select') and self._version_to_select:
+                # Si hay una versión específica a seleccionar (después de descargar)
+                version_to_select = self._version_to_select
+                self._version_to_select = None  # Limpiar
+                print(f"[INFO] Seleccionando versión recién descargada: {version_to_select}")
+            else:
+                # Si no, cargar la última versión seleccionada
+                version_to_select = self.load_last_selected_version()
+            
+            # Seleccionar la versión
+            if version_to_select and version_to_select in version_to_index:
+                index = version_to_index[version_to_select]
+                # Bloquear signals temporalmente para evitar que on_version_changed se dispare
+                self.version_combo.blockSignals(True)
                 self.version_combo.setCurrentIndex(index)
-                self.add_message(f"Versión restaurada: {last_version}")
-                # Actualizar el fondo según la versión restaurada
+                self.version_combo.blockSignals(False)
+                # Determinar si es una versión recién descargada o restaurada
+                # (verificamos si _version_to_select existía antes de limpiarlo)
+                was_new_download = hasattr(self, '_version_to_select_was_set') and self._version_to_select_was_set
+                if was_new_download:
+                    self.add_message(f"Versión {version_to_select} seleccionada")
+                    self._version_to_select_was_set = False  # Limpiar flag
+                else:
+                    self.add_message(f"Versión restaurada: {version_to_select}")
+                # Actualizar el fondo según la versión seleccionada (sin hacer merge)
                 display_name = self.version_combo.currentText()
-                self._update_background_for_version(last_version, display_name)
+                self._update_background_for_version(version_to_select, display_name)
+                # Llamar manualmente a on_version_changed para cargar requisitos de Java
+                # pero solo después de que todo esté listo
+                QApplication.processEvents()  # Procesar eventos pendientes
+                self.on_version_changed(display_name)
             else:
                 # Si no hay versión guardada o no está disponible, seleccionar la primera
-                if last_version:
-                    self.add_message(f"Versión guardada '{last_version}' no está disponible, seleccionando primera versión")
-                # Actualizar el fondo para la primera versión seleccionada
+                if version_to_select:
+                    self.add_message(f"Versión '{version_to_select}' no está disponible, seleccionando primera versión")
+                # Actualizar el fondo para la primera versión seleccionada (sin hacer merge)
                 if organized_versions:
                     first_version_id = organized_versions[0][1]
                     first_display_name = organized_versions[0][0]
+                    # Bloquear signals temporalmente
+                    self.version_combo.blockSignals(True)
+                    self.version_combo.setCurrentIndex(0)
+                    self.version_combo.blockSignals(False)
                     self._update_background_for_version(first_version_id, first_display_name)
+                    # Llamar manualmente a on_version_changed para cargar requisitos de Java
+                    QApplication.processEvents()
+                    self.on_version_changed(first_display_name)
             self.version_combo.setEnabled(True)
         else:
             self.version_combo.addItem("No hay versiones disponibles")
@@ -1014,6 +1725,18 @@ class LauncherWindow(QMainWindow):
         self.version_combo.setEnabled(False)
         self.add_message(f"Error cargando versiones: {error_msg}")
     
+    def show_add_version_dialog(self):
+        """Muestra el diálogo para añadir una nueva versión"""
+        dialog = VersionDownloadDialog(self, self.minecraft_launcher)
+        # Guardar referencia al diálogo
+        self.version_download_dialog = dialog
+        
+        result = dialog.exec_()
+        
+        # Limpiar referencia al diálogo
+        if self.version_download_dialog == dialog:
+            self.version_download_dialog = None
+    
     def load_versions(self):
         """Carga las versiones de Minecraft disponibles (solo las descargadas) - versión síncrona para el botón refresh"""
         # Bloquear signals temporalmente para evitar que se guarde durante la carga
@@ -1030,8 +1753,8 @@ class LauncherWindow(QMainWindow):
         # Forzar actualización de la UI
         QApplication.processEvents()
         
-        # Solo mostrar versiones completamente descargadas
-        versions = self.minecraft_launcher.get_available_versions(only_downloaded=True)
+        # Solo mostrar versiones completamente descargadas (usar strict_check=False para incluir versiones recién descargadas)
+        versions = self.minecraft_launcher.get_available_versions(only_downloaded=True, strict_check=False)
         
         # Ocultar barra de progreso
         self.progress_bar.setVisible(False)
@@ -1052,20 +1775,34 @@ class LauncherWindow(QMainWindow):
             last_version = self.load_last_selected_version()
             if last_version and last_version in version_to_index:
                 index = version_to_index[last_version]
+                # Bloquear signals temporalmente para evitar que on_version_changed se dispare
+                self.version_combo.blockSignals(True)
                 self.version_combo.setCurrentIndex(index)
+                self.version_combo.blockSignals(False)
                 self.add_message(f"Versión restaurada: {last_version}")
-                # Actualizar el fondo según la versión restaurada
+                # Actualizar el fondo según la versión restaurada (sin hacer merge)
                 display_name = self.version_combo.currentText()
                 self._update_background_for_version(last_version, display_name)
+                # Llamar manualmente a on_version_changed para cargar requisitos de Java
+                # pero solo después de que todo esté listo
+                QApplication.processEvents()  # Procesar eventos pendientes
+                self.on_version_changed(display_name)
             else:
                 # Si no hay versión guardada o no está disponible, seleccionar la primera
                 if last_version:
                     self.add_message(f"Versión guardada '{last_version}' no está disponible, seleccionando primera versión")
-                # Actualizar el fondo para la primera versión seleccionada
+                # Actualizar el fondo para la primera versión seleccionada (sin hacer merge)
                 if organized_versions:
                     first_version_id = organized_versions[0][1]
                     first_display_name = organized_versions[0][0]
+                    # Bloquear signals temporalmente
+                    self.version_combo.blockSignals(True)
+                    self.version_combo.setCurrentIndex(0)
+                    self.version_combo.blockSignals(False)
                     self._update_background_for_version(first_version_id, first_display_name)
+                    # Llamar manualmente a on_version_changed para cargar requisitos de Java
+                    QApplication.processEvents()
+                    self.on_version_changed(first_display_name)
             self.version_combo.setEnabled(True)
         else:
             self.version_combo.clear()
@@ -1231,6 +1968,90 @@ class LauncherWindow(QMainWindow):
         else:
             self.progress_bar.setRange(0, 0)  # Modo indeterminado
     
+    def on_version_download_progress(self, downloaded: int, total: int, message: str):
+        """Actualiza el progreso durante la descarga de una versión"""
+        print(f"[INFO] Progreso de descarga: {downloaded}/{total} - {message}")
+        if hasattr(self, 'progress_bar'):
+            self.progress_bar.setVisible(True)
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(downloaded)
+        if hasattr(self, 'progress_label'):
+            self.progress_label.setVisible(True)
+            self.progress_label.setText(message)
+    
+    def on_version_download_finished(self, version_id: str):
+        """Se llama cuando la descarga de una versión se completa"""
+        print(f"[INFO] Descarga de versión completada: {version_id}")
+        try:
+            if hasattr(self, 'progress_bar'):
+                self.progress_bar.setVisible(False)
+            if hasattr(self, 'progress_label'):
+                self.progress_label.setVisible(False)
+            self.add_message(f"Versión {version_id} descargada correctamente")
+            
+            # Esperar a que el thread termine completamente antes de limpiarlo
+            if hasattr(self, 'version_download_thread') and self.version_download_thread:
+                # Esperar hasta que el thread termine (máximo 5 segundos)
+                if self.version_download_thread.isRunning():
+                    print(f"[INFO] Esperando a que el thread termine...")
+                    if not self.version_download_thread.wait(5000):  # Esperar máximo 5 segundos
+                        print(f"[WARN] El thread no terminó en 5 segundos, forzando limpieza")
+                    else:
+                        print(f"[INFO] Thread de descarga finalizado correctamente")
+                
+                # Limpiar el thread después de que haya terminado
+                self.version_download_thread.deleteLater()
+                self.version_download_thread = None
+            
+            # Cerrar el diálogo de descarga si está abierto
+            if hasattr(self, 'version_download_dialog') and self.version_download_dialog:
+                print(f"[INFO] Cerrando diálogo de descarga")
+                self.version_download_dialog.accept()
+                self.version_download_dialog = None
+            
+            # Refrescar la lista de versiones y seleccionar la nueva versión
+            self.load_versions_async(select_version=version_id)
+        except Exception as e:
+            print(f"[ERROR] Error en on_version_download_finished: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def on_version_download_error(self, error: str):
+        """Se llama cuando hay un error en la descarga de una versión"""
+        print(f"[ERROR] Error descargando versión: {error}")
+        try:
+            if hasattr(self, 'progress_bar'):
+                self.progress_bar.setVisible(False)
+            if hasattr(self, 'progress_label'):
+                self.progress_label.setVisible(False)
+            self.add_message(f"Error descargando versión: {error}")
+            
+            # Esperar a que el thread termine completamente antes de limpiarlo
+            if hasattr(self, 'version_download_thread') and self.version_download_thread:
+                # Esperar hasta que el thread termine (máximo 5 segundos)
+                if self.version_download_thread.isRunning():
+                    print(f"[INFO] Esperando a que el thread termine (error)...")
+                    if not self.version_download_thread.wait(5000):  # Esperar máximo 5 segundos
+                        print(f"[WARN] El thread no terminó en 5 segundos, forzando limpieza")
+                    else:
+                        print(f"[INFO] Thread de descarga finalizado (con error)")
+                
+                # Limpiar el thread después de que haya terminado
+                self.version_download_thread.deleteLater()
+                self.version_download_thread = None
+            
+            # Cerrar el diálogo de descarga si está abierto (aunque haya error)
+            if hasattr(self, 'version_download_dialog') and self.version_download_dialog:
+                print(f"[INFO] Cerrando diálogo de descarga (error)")
+                self.version_download_dialog.accept()
+                self.version_download_dialog = None
+            
+            QMessageBox.critical(self, "Error", f"No se pudo descargar la versión:\n{error}")
+        except Exception as e:
+            print(f"[ERROR] Error en on_version_download_error: {e}")
+            import traceback
+            traceback.print_exc()
+    
     def on_java_download_finished(self, java_path: str):
         """Se llama cuando la descarga de Java se completa"""
         self.progress_bar.setValue(100)
@@ -1255,13 +2076,25 @@ class LauncherWindow(QMainWindow):
     
     def on_version_changed(self, version_name: str):
         """Se llama cuando cambia la versión de Minecraft seleccionada"""
+        # Ignorar valores temporales o inválidos
+        invalid_values = [
+            "No hay versiones disponibles",
+            "Cargando versiones...",
+            "Cargando...",
+            "Error cargando versiones"
+        ]
+        
+        if version_name in invalid_values:
+            self.java_required_label.setText("")
+            return
+        
         # Obtener el ID real de la versión (sin prefijos)
         version_id = self.version_combo.currentData()
         if not version_id:
             # Fallback: intentar extraer del texto si no hay data
             version_id = version_name
         
-        if not version_id or version_id == "No hay versiones disponibles":
+        if not version_id or version_id in invalid_values:
             self.java_required_label.setText("")
             return
         
@@ -1408,7 +2241,7 @@ class LauncherWindow(QMainWindow):
         if "snapshot" in version_id.lower() or "snapshot" in version_name.lower():
             is_snapshot = True
         else:
-            # Verificar en el JSON si el tipo es "snapshot"
+            # Verificar en el JSON si el tipo es "snapshot" (solo leer, sin merge)
             try:
                 json_path = os.path.join(
                     self.minecraft_launcher.minecraft_path,
@@ -1427,7 +2260,7 @@ class LauncherWindow(QMainWindow):
         if is_snapshot:
             bg_type = "snapshot"
         else:
-            # Verificar si es custom (tiene inheritsFrom)
+            # Verificar si es custom (tiene inheritsFrom) - solo leer, sin merge
             try:
                 json_path = os.path.join(
                     self.minecraft_launcher.minecraft_path,
