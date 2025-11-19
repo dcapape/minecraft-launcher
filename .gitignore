@@ -1,0 +1,74 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Entornos virtuales
+env/
+venv/
+ENV/
+.venv/
+.venv
+
+# Logs
+*.log
+logs/
+*.log.*
+
+# Archivos de configuración sensibles
+credentials.json
+*.db
+*.sqlite
+*.sqlite3
+
+# Archivos del sistema
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDEs y editores
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# Archivos temporales
+*.tmp
+*.temp
+*.bak
+*.backup
+*.orig
+
+# Archivos de test temporales
+test_*.py.bak
+test_output/
+test_results/
+
+# Archivos de Minecraft (si se descargan localmente)
+.minecraft/
+minecraft_versions/
+libraries/
+
+# Archivos de Java runtime (si se descargan)
+java_runtime/
+jre/
+jdk/
+
+# Archivos de configuración local
+launcher_config.local.json
+config.local.json
+*.local.json
+
+key.key
+launcher_config.json
+
