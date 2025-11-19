@@ -15,10 +15,14 @@ jobs:
   build-windows:
     name: Build Windows Executable
     runs-on: windows-latest
+    permissions:
+      contents: write  # Necesario para crear releases y subir archivos
     
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Necesario para obtener tags completos
       
     - name: Set up Python
       uses: actions/setup-python@v5
@@ -97,6 +101,8 @@ jobs:
           MinecraftLauncher-*-windows.zip
         draft: false
         prerelease: false
+        make_latest: true
+        generate_release_notes: false
         body: |
           ## Minecraft Launcher - Windows
           
