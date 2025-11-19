@@ -13,6 +13,12 @@ A custom launcher for Minecraft Java Edition that maintains user credentials for
 - ✅ Full support for NeoForge, Forge, Fabric, and Vanilla versions
 - ✅ Automatic Java runtime detection and download
 - ✅ Proper handling of version inheritance and library management
+- ✅ **Download new Minecraft versions** directly from Mojang's manifest
+- ✅ **Automatic library downloading** when installing new versions
+- ✅ **Hierarchical version organization** (Vanilla, Custom, Snapshot)
+- ✅ **Dynamic background images** based on version type
+- ✅ **User menu** with avatar and session management
+- ✅ **Background version loading** for faster startup
 
 ## Requirements
 
@@ -77,9 +83,15 @@ python launcher.py
    - Follow the on-screen instructions to complete the OAuth flow
    - The launcher will open a browser window for Microsoft authentication
 
-3. **Launch Minecraft:**
-   - Once authenticated, select a Minecraft version from the dropdown
+3. **Select or Download Minecraft Version:**
+   - Select a Minecraft version from the dropdown (organized as Vanilla, Custom, Snapshot)
+   - Click the "+" button to download new versions from Mojang's manifest
+   - The launcher will automatically download the version JSON, client JAR, and all required libraries
+   - Downloads continue in the background even after closing the download dialog
+
+4. **Launch Minecraft:**
    - Click "Launch Minecraft" to start the game
+   - If not authenticated, the launcher will prompt you to sign in
    - The launcher will automatically:
      - Detect or download the required Java version
      - Build the correct classpath and module path
@@ -273,10 +285,23 @@ The launcher properly handles version inheritance by:
 - Only architecture-specific files are extracted (e.g., `windows/x64/`)
 - Files are placed directly in the root of the hash directory (no nested structure)
 
+## New Features in v1.0.7
+
+- **Version Download System**: Download new Minecraft versions directly from Mojang's manifest API
+- **Automatic Library Management**: When downloading a new version, all required libraries are automatically downloaded
+- **Background Downloads**: Version and library downloads continue in the background even after closing the download dialog
+- **Improved UI**: 
+  - User menu with avatar and session status in the top-right corner
+  - Dynamic background images that change based on version type (Vanilla, Custom, Snapshot)
+  - Hierarchical version organization for better navigation
+- **Performance Improvements**: 
+  - Background version loading for faster startup
+  - Asynchronous operations to keep the UI responsive
+
 ## Limitations
 
 - This launcher is a custom implementation focused on core functionality
-- For advanced features (mod management, version downloads, etc.), consider using official launchers or more complete alternatives
+- Some advanced mod management features may not be available
 - Minecraft must be properly installed with all dependencies
 - Some edge cases in version JSONs may not be fully supported
 
