@@ -41,9 +41,10 @@ class AuthManager:
         }
         return f"https://login.live.com/oauth20_authorize.srf?{urllib.parse.urlencode(auth_params)}"
     
-    def exchange_code_for_token(self, redirect_url: str) -> Optional[str]:
+    def exchange_code_for_token(self, redirect_url: str) -> Optional[Dict]:
         """
         Intercambia el código de autorización de la URL de redirección por un token
+        Retorna un diccionario con access_token, refresh_token y expires_in
         """
         try:
             REDIRECT_URI = "https://login.live.com/oauth20_desktop.srf"
@@ -83,7 +84,12 @@ class AuthManager:
                 print(f"Error: No se recibió access_token. Respuesta: {token_result}")
                 return None
             
-            return token_result["access_token"]
+            # Retornar access_token, refresh_token y expires_in
+            return {
+                "access_token": token_result.get("access_token"),
+                "refresh_token": token_result.get("refresh_token"),
+                "expires_in": token_result.get("expires_in", 3600)  # Por defecto 1 hora si no viene
+            }
             
         except Exception as e:
             print(f"Error intercambiando código por token: {str(e)}")
@@ -101,9 +107,13 @@ class AuthManager:
                 return {"auth_url": self.get_authorization_url()}
             
             # Paso 1: Obtener token de Microsoft usando el código de la URL
-            ms_access_token = self.exchange_code_for_token(redirect_url)
-            if not ms_access_token:
+            ms_token_data = self.exchange_code_for_token(redirect_url)
+            if not ms_token_data or "access_token" not in ms_token_data:
                 return None
+            
+            ms_access_token = ms_token_data["access_token"]
+            ms_refresh_token = ms_token_data.get("refresh_token")
+            ms_expires_in = ms_token_data.get("expires_in", 3600)
             
             # Paso 2: Autenticar con Xbox Live
             xbox_token = self._authenticate_xbox(ms_access_token)
@@ -125,11 +135,14 @@ class AuthManager:
             if not profile:
                 return None
             
+            # El token de Minecraft normalmente dura 24 horas, pero usaremos 23 horas para estar seguros
+            # Guardamos también el refresh_token de Microsoft para poder refrescar la sesión
             return {
                 "access_token": minecraft_token,
                 "username": profile.get("name"),
                 "uuid": profile.get("id"),
-                "expires_at": time.time() + 3600  # 1 hora de validez
+                "ms_refresh_token": ms_refresh_token,  # Refresh token de Microsoft
+                "expires_at": time.time() + (23 * 3600)  # 23 horas de validez (el token de Minecraft dura ~24h)
             }
             
         except Exception as e:
@@ -206,9 +219,96 @@ class AuthManager:
             print(f"Error obteniendo perfil: {str(e)}")
             return None
     
-    def refresh_token(self, refresh_token: str) -> Optional[Dict]:
-        """Refresca el token de acceso usando el refresh token"""
-        # Nota: La implementación completa dependería de tener un refresh token válido
-        # Por ahora, requerimos reautenticación
-        return self.authenticate()
+    def validate_token(self, access_token: str) -> bool:
+        """Valida si un token de acceso es válido haciendo una petición a la API de Minecraft"""
+        try:
+            headers = {"Authorization": f"Bearer {access_token}"}
+            response = requests.get(self.PROFILE_URL, headers=headers, timeout=5)
+            # Si la respuesta es 200, el token es válido
+            return response.status_code == 200
+        except Exception as e:
+            print(f"Error validando token: {str(e)}")
+            return False
+    
+    def refresh_microsoft_token(self, refresh_token: str) -> Optional[Dict]:
+        """Refresca el token de Microsoft usando el refresh token"""
+        try:
+            REDIRECT_URI = "https://login.live.com/oauth20_desktop.srf"
+            
+            token_data = {
+                "client_id": self.CLIENT_ID,
+                "refresh_token": refresh_token,
+                "grant_type": "refresh_token",
+                "redirect_uri": REDIRECT_URI
+            }
+            
+            token_response = requests.post(
+                "https://login.live.com/oauth20_token.srf",
+                data=token_data
+            )
+            
+            if token_response.status_code != 200:
+                print(f"Error refrescando token: {token_response.text[:500]}")
+                return None
+            
+            token_result = token_response.json()
+            
+            if "access_token" not in token_result:
+                print(f"Error: No se recibió access_token al refrescar. Respuesta: {token_result}")
+                return None
+            
+            return {
+                "access_token": token_result.get("access_token"),
+                "refresh_token": token_result.get("refresh_token", refresh_token),  # Usar el nuevo o mantener el anterior
+                "expires_in": token_result.get("expires_in", 3600)
+            }
+            
+        except Exception as e:
+            print(f"Error refrescando token de Microsoft: {str(e)}")
+            return None
+    
+    def refresh_minecraft_session(self, ms_refresh_token: str) -> Optional[Dict]:
+        """
+        Refresca la sesión completa de Minecraft usando el refresh token de Microsoft
+        """
+        try:
+            # Paso 1: Refrescar token de Microsoft
+            ms_token_data = self.refresh_microsoft_token(ms_refresh_token)
+            if not ms_token_data:
+                return None
+            
+            ms_access_token = ms_token_data["access_token"]
+            new_ms_refresh_token = ms_token_data.get("refresh_token", ms_refresh_token)
+            
+            # Paso 2: Autenticar con Xbox Live
+            xbox_token = self._authenticate_xbox(ms_access_token)
+            if not xbox_token:
+                return None
+            
+            # Paso 3: Obtener token de XSTS
+            xsts_token, userhash = self._get_xsts_token(xbox_token)
+            if not xsts_token:
+                return None
+            
+            # Paso 4: Autenticar con Minecraft
+            minecraft_token = self._authenticate_minecraft(userhash, xsts_token)
+            if not minecraft_token:
+                return None
+            
+            # Paso 5: Obtener perfil de Minecraft
+            profile = self._get_minecraft_profile(minecraft_token)
+            if not profile:
+                return None
+            
+            return {
+                "access_token": minecraft_token,
+                "username": profile.get("name"),
+                "uuid": profile.get("id"),
+                "ms_refresh_token": new_ms_refresh_token,
+                "expires_at": time.time() + (23 * 3600)  # 23 horas de validez
+            }
+            
+        except Exception as e:
+            print(f"Error refrescando sesión de Minecraft: {str(e)}")
+            return None
 

@@ -2349,29 +2349,114 @@ class LauncherWindow(QMainWindow):
         QMessageBox.warning(self, "Error de Autenticación", error)
     
     def load_saved_credentials(self):
-        """Carga credenciales guardadas"""
+        """Carga credenciales guardadas y valida/refresca el token si es necesario"""
         if self.credential_storage.has_credentials():
             credentials = self.credential_storage.load_credentials()
             if credentials:
                 username = credentials.get("username", "Usuario")
-                # Verificar si el token sigue siendo válido
+                access_token = credentials.get("access_token", "")
                 expires_at = credentials.get("expires_at", 0)
-                if time.time() < expires_at:
-                    # Token válido
-                    self.update_user_widget(credentials)
-                    # Habilitar el botón de lanzar cuando hay sesión
-                    self.launch_button.setEnabled(True)
-                    self.add_message(f"Credenciales cargadas para: {username}")
+                ms_refresh_token = credentials.get("ms_refresh_token")
+                current_time = time.time()
+                
+                # Verificar si el token está cerca de expirar (menos de 1 hora restante) o ya expiró
+                time_until_expiry = expires_at - current_time
+                
+                if time_until_expiry < 3600:  # Menos de 1 hora restante
+                    # Intentar refrescar el token si tenemos refresh_token
+                    if ms_refresh_token:
+                        self.add_message(f"Refrescando sesión para: {username}...")
+                        try:
+                            new_credentials = self.auth_manager.refresh_minecraft_session(ms_refresh_token)
+                            if new_credentials:
+                                # Guardar las nuevas credenciales
+                                if self.credential_storage.save_credentials(new_credentials):
+                                    credentials = new_credentials
+                                    access_token = new_credentials.get("access_token", "")
+                                    expires_at = new_credentials.get("expires_at", 0)
+                                    self.add_message(f"Sesión refrescada exitosamente para: {username}")
+                                else:
+                                    self.add_message("Error guardando credenciales refrescadas")
+                            else:
+                                # No se pudo refrescar, intentar validar el token actual
+                                self.add_message("No se pudo refrescar la sesión, validando token actual...")
+                        except Exception as e:
+                            print(f"Error refrescando sesión: {e}")
+                            self.add_message("Error al refrescar sesión, validando token actual...")
+                
+                # Verificar si el token ha expirado completamente
+                if current_time >= expires_at:
+                    if ms_refresh_token:
+                        # Ya intentamos refrescar arriba, si llegamos aquí es que falló
+                        self.add_message(f"La sesión ha expirado para: {username}. Por favor, inicia sesión nuevamente.")
+                        self.update_user_widget(None)
+                        self.launch_button.setEnabled(False)
+                        return
+                    else:
+                        # No hay refresh_token, pedir reautenticación
+                        self.add_message(f"La sesión ha expirado para: {username}. Por favor, inicia sesión nuevamente.")
+                        self.update_user_widget(None)
+                        self.launch_button.setEnabled(False)
+                        return
+                
+                # Si el token no ha expirado, validarlo con la API
+                if access_token:
+                    self.add_message("Validando sesión...")
+                    is_valid = self.auth_manager.validate_token(access_token)
+                    if is_valid:
+                        # Token válido
+                        self.update_user_widget(credentials)
+                        self.launch_button.setEnabled(True)
+                        # Mostrar tiempo restante de forma amigable
+                        hours_left = int(time_until_expiry / 3600)
+                        minutes_left = int((time_until_expiry % 3600) / 60)
+                        if hours_left > 0:
+                            self.add_message(f"Sesión activa para: {username} ({hours_left}h {minutes_left}m restantes)")
+                        else:
+                            self.add_message(f"Sesión activa para: {username} ({minutes_left}m restantes)")
+                    else:
+                        # Token inválido (revocado), intentar refrescar si tenemos refresh_token
+                        if ms_refresh_token:
+                            self.add_message("Token inválido, intentando refrescar...")
+                            try:
+                                new_credentials = self.auth_manager.refresh_minecraft_session(ms_refresh_token)
+                                if new_credentials:
+                                    if self.credential_storage.save_credentials(new_credentials):
+                                        credentials = new_credentials
+                                        self.update_user_widget(credentials)
+                                        self.launch_button.setEnabled(True)
+                                        self.add_message(f"Sesión refrescada exitosamente para: {username}")
+                                    else:
+                                        self.add_message("Error guardando credenciales refrescadas")
+                                        self.update_user_widget(None)
+                                        self.launch_button.setEnabled(False)
+                                else:
+                                    # No se pudo refrescar
+                                    self.add_message(f"La sesión no es válida para: {username}. Por favor, inicia sesión nuevamente.")
+                                    self.update_user_widget(None)
+                                    self.launch_button.setEnabled(False)
+                                    self.credential_storage.clear_credentials()
+                            except Exception as e:
+                                print(f"Error refrescando sesión: {e}")
+                                self.add_message(f"La sesión no es válida para: {username}. Por favor, inicia sesión nuevamente.")
+                                self.update_user_widget(None)
+                                self.launch_button.setEnabled(False)
+                                self.credential_storage.clear_credentials()
+                        else:
+                            # No hay refresh_token, pedir reautenticación
+                            self.add_message(f"La sesión no es válida para: {username}. Por favor, inicia sesión nuevamente.")
+                            self.update_user_widget(None)
+                            self.launch_button.setEnabled(False)
+                            self.credential_storage.clear_credentials()
                 else:
-                    # Token expirado, pero mostrar usuario de todas formas
-                    # La reautenticación se pedirá al intentar lanzar
-                    self.update_user_widget(credentials)
-                    self.add_message(f"Credenciales cargadas para: {username} (sesión expirada, se pedirá reautenticación al lanzar)")
-                    # El botón se habilitará igual, pero pedirá reautenticación al lanzar
-                    self.launch_button.setEnabled(True)
+                    # No hay token, mostrar como no autenticado
+                    self.add_message("No se encontró token de acceso válido")
+                    self.update_user_widget(None)
+                    self.launch_button.setEnabled(False)
             else:
                 self.add_message("Error cargando credenciales guardadas")
                 self.update_user_widget(None)
+                self.launch_button.setEnabled(False)
     
     def launch_minecraft(self):
         """Lanza Minecraft con las credenciales guardadas"""
@@ -2381,9 +2466,39 @@ class LauncherWindow(QMainWindow):
             self.start_authentication()
             return
         
-        # Verificar si el token ha expirado
+        # Verificar si el token está cerca de expirar o ya expiró
         expires_at = credentials.get("expires_at", 0)
-        if time.time() >= expires_at:
+        current_time = time.time()
+        time_until_expiry = expires_at - current_time
+        ms_refresh_token = credentials.get("ms_refresh_token")
+        
+        if time_until_expiry < 3600:  # Menos de 1 hora restante
+            # Intentar refrescar el token si tenemos refresh_token
+            if ms_refresh_token:
+                self.add_message("Refrescando sesión antes de lanzar...")
+                try:
+                    new_credentials = self.auth_manager.refresh_minecraft_session(ms_refresh_token)
+                    if new_credentials:
+                        if self.credential_storage.save_credentials(new_credentials):
+                            credentials = new_credentials
+                            self.add_message("Sesión refrescada exitosamente")
+                        else:
+                            self.add_message("Error guardando credenciales refrescadas")
+                    else:
+                        # No se pudo refrescar
+                        if current_time >= expires_at:
+                            self.add_message("La sesión ha expirado. Por favor, inicia sesión nuevamente.")
+                            self.start_authentication()
+                            return
+                except Exception as e:
+                    print(f"Error refrescando sesión: {e}")
+                    if current_time >= expires_at:
+                        self.add_message("La sesión ha expirado. Por favor, inicia sesión nuevamente.")
+                        self.start_authentication()
+                        return
+        
+        # Verificar si el token ha expirado completamente
+        if current_time >= expires_at:
             # Token expirado, pedir reautenticación
             self.add_message("La sesión ha expirado. Por favor, inicia sesión nuevamente.")
             self.start_authentication()
