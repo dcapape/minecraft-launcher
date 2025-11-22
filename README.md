@@ -19,6 +19,10 @@ A custom launcher for Minecraft Java Edition that maintains user credentials for
 - ✅ **Dynamic background images** based on version type
 - ✅ **User menu** with avatar and session management
 - ✅ **Background version loading** for faster startup
+- ✅ **Custom Game Profiles** - Install custom NeoForge/Forge/Vanilla profiles with mods, shaders, and resource packs
+- ✅ **Automatic asset downloading** - Downloads and verifies Minecraft assets from Mojang servers
+- ✅ **Server Manager** (Developer Mode) - Manage remote server profiles and configurations
+- ✅ **Isolated profile directories** - Each custom profile has its own mods, shaders, resource packs, and config
 
 ## Requirements
 
@@ -89,11 +93,22 @@ python launcher.py
    - The launcher will automatically download the version JSON, client JAR, and all required libraries
    - Downloads continue in the background even after closing the download dialog
 
-4. **Launch Minecraft:**
+4. **Custom Profiles (Optional):**
+   - Click the "+" button and select "Custom" to add a remote profile
+   - Enter the server hostname/IP to fetch profile configuration
+   - The launcher will automatically:
+     - Download and install the base Minecraft/NeoForge version
+     - Download all specified mods, shaders, and resource packs
+     - Configure the profile's `options.txt` file
+     - Download all required assets from Mojang servers
+   - Custom profiles are stored in `.minecraft/profiles/{profile_id}/` with complete isolation
+
+5. **Launch Minecraft:**
    - Click "Launch Minecraft" to start the game
    - If not authenticated, the launcher will prompt you to sign in
    - The launcher will automatically:
      - Detect or download the required Java version
+     - Verify and download missing assets from Mojang servers
      - Build the correct classpath and module path
      - Extract native libraries to a temporary directory
      - Launch the game with proper credentials
@@ -185,13 +200,24 @@ The launcher uses Microsoft OAuth 2.0 flow for authentication:
 ### Minecraft Launch Process
 
 1. **Version Detection** - Automatically detects installed Minecraft versions
-2. **Version Inheritance** - Properly merges parent and child version JSONs
-3. **Library Management** - Resolves all required libraries from merged JSON
-4. **Classpath Construction** - Builds complete classpath with all libraries + version JAR
-5. **Module Path Construction** - Builds module path with only explicitly listed JARs
-6. **Native Extraction** - Extracts native libraries to unique temporary directory (`bin/<HASH>`)
-7. **JVM Arguments** - Constructs proper JVM arguments respecting order and conditional rules
-8. **Launch** - Executes Java with all required arguments
+2. **Asset Verification** - Verifies and downloads missing assets from Mojang servers
+3. **Version Inheritance** - Properly merges parent and child version JSONs
+4. **Library Management** - Resolves all required libraries from merged JSON
+5. **Classpath Construction** - Builds complete classpath with all libraries + version JAR
+6. **Module Path Construction** - Builds module path with only explicitly listed JARs
+7. **Native Extraction** - Extracts native libraries to unique temporary directory (`bin/<HASH>`)
+8. **JVM Arguments** - Constructs proper JVM arguments respecting order and conditional rules
+9. **Launch** - Executes Java with all required arguments
+
+### Custom Profile Installation Process
+
+1. **Profile Configuration** - Fetches profile JSON from remote server (`/profiles.json`)
+2. **Base Version Installation** - Downloads and installs vanilla Minecraft version into profile directory
+3. **NeoForge Installation** (if applicable) - Runs NeoForge installer targeting the profile directory
+4. **Library Download** - Downloads all required libraries (including inherited ones) to profile's `libraries/` folder
+5. **Asset Download** - Downloads all required assets to global `.minecraft/assets/` directory
+6. **Mods/Shaders/Resource Packs** - Downloads all specified mods, shaders, and resource packs to profile directories
+7. **Configuration** - Creates `launcher_profiles.json` and configures `options.txt` with profile settings
 
 ### Key Features
 
@@ -209,6 +235,8 @@ launcher/
 ├── auth_manager.py          # Microsoft authentication manager
 ├── credential_storage.py    # Encrypted credential storage
 ├── java_downloader.py       # Java runtime downloader
+├── asset_downloader.py     # Minecraft assets downloader and verifier
+├── server_manager.py        # Server profile manager (developer mode)
 ├── config.py               # Configuration management
 ├── requirements.txt         # Python dependencies
 ├── launcher_config.json     # Launcher configuration
@@ -254,6 +282,15 @@ launcher/
 - Verify all required libraries are downloaded
 - Ensure the version JSON is valid and complete
 - Check that Java version matches the required version
+- For custom profiles, verify that all assets are downloaded (check `.minecraft/assets/`)
+
+### Custom profile installation fails
+
+- Verify the server URL is accessible and returns valid JSON at `/profiles.json`
+- Check that the profile JSON has all required fields (version_base, mods, etc.)
+- Ensure you have sufficient disk space for the profile installation
+- Check network connectivity for downloading mods, shaders, and resource packs
+- Verify that the base Minecraft version exists in the manifest
 
 ## Security Notes
 
@@ -284,6 +321,28 @@ The launcher properly handles version inheritance by:
 - Extracted to unique temporary directory: `.minecraft/bin/<HASH>/`
 - Only architecture-specific files are extracted (e.g., `windows/x64/`)
 - Files are placed directly in the root of the hash directory (no nested structure)
+
+## New Features in v1.1.0
+
+- **Custom Game Profiles System**: 
+  - Install custom NeoForge/Forge/Vanilla profiles from remote servers
+  - Each profile is completely isolated with its own mods, shaders, resource packs, and config
+  - Profiles are stored in `.minecraft/profiles/{profile_id}/` with full directory structure
+  - Automatic installation of base versions and all required libraries
+- **Automatic Asset Downloading**:
+  - Downloads Minecraft assets from `resources.download.minecraft.net`
+  - Verifies asset integrity using SHA-1 hashes
+  - Assets are downloaded automatically when missing (during installation or launch)
+  - Assets are stored in the global `.minecraft/assets/` directory (shared between versions)
+- **Server Manager (Developer Mode)**:
+  - Enable "Developer Mode" in the user menu to access server management
+  - Manage remote server profiles and configurations
+  - Edit profile JSONs, upload mods, shaders, and resource packs
+  - Test and update server configurations
+- **Improved Profile Isolation**:
+  - Custom profiles use `--gameDir` to point to their own directory
+  - Resource packs, shaders, and mods are loaded from the profile directory
+  - Assets are loaded from the global directory (shared, not duplicated)
 
 ## New Features in v1.0.7
 
