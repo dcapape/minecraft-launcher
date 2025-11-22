@@ -4,6 +4,7 @@ Launcher principal de Minecraft Java Edition
 import sys
 import time
 import platform
+import subprocess
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QPushButton, QLabel, QLineEdit, 
                              QTextEdit, QMessageBox, QProgressBar, QDialog, QDialogButtonBox,
@@ -1013,6 +1014,747 @@ class VersionDownloadDialog(QDialog):
                 self.parent().progress_label.setVisible(False)
         QMessageBox.critical(self, "Error", f"No se pudo descargar la versión:\n{error}")
 
+class InstallProfileThread(QThread):
+    """Thread para instalar un perfil personalizado sin bloquear la UI"""
+    progress = pyqtSignal(int, int, str)  # progreso, total, mensaje
+    finished = pyqtSignal(str)  # id del perfil instalado
+    error = pyqtSignal(str)
+    
+    def __init__(self, profile, hostname, minecraft_path, profiles_data=None):
+        super().__init__()
+        self.profile = profile
+        self.hostname = hostname
+        self.minecraft_path = minecraft_path
+        self.profiles_data = profiles_data  # Para obtener server_url si está disponible
+        self.system = platform.system()
+    
+    def run(self):
+        try:
+            profile_id = self.profile.get("id", "unknown")
+            profile_name = self.profile.get("name", "Sin nombre")
+            
+            # Crear carpeta del perfil
+            profile_dir = os.path.join(self.minecraft_path, "profiles", profile_id)
+            os.makedirs(profile_dir, exist_ok=True)
+            
+            self.progress.emit(5, 100, f"Creando estructura de carpetas para {profile_name}...")
+            
+            # Crear estructura de carpetas necesaria
+            for folder in ["mods", "shaderpacks", "resourcepacks", "config", "saves"]:
+                os.makedirs(os.path.join(profile_dir, folder), exist_ok=True)
+            
+            # Paso 1: Instalar versión base
+            version_base = self.profile.get("version_base", {})
+            version_type = version_base.get("type", "vanilla")
+            
+            if version_type == "neoforge":
+                self.progress.emit(10, 100, "Instalando NeoForge...")
+                self._install_neoforge(version_base, profile_dir, profile_name)
+            elif version_type == "vanilla":
+                self.progress.emit(10, 100, "Instalando versión Vanilla...")
+                self._install_vanilla(version_base, profile_dir, profile_name)
+            
+            # Paso 2: Descargar mods
+            mods = self.profile.get("mods", [])
+            if mods:
+                self.progress.emit(40, 100, f"Descargando {len(mods)} mod(s)...")
+                self._download_mods(mods, profile_dir)
+            
+            # Paso 3: Descargar shaders
+            shaders = self.profile.get("shaders", [])
+            if shaders:
+                self.progress.emit(60, 100, f"Descargando {len(shaders)} shader(s)...")
+                self._download_shaders(shaders, profile_dir)
+            
+            # Paso 4: Descargar resource packs
+            resourcepacks = self.profile.get("resourcepacks", [])
+            if resourcepacks:
+                self.progress.emit(80, 100, f"Descargando {len(resourcepacks)} resource pack(s)...")
+                self._download_resourcepacks(resourcepacks, profile_dir)
+            
+            # Paso 5: Configurar options.txt
+            self.progress.emit(90, 100, "Configurando opciones...")
+            self._configure_options(profile_dir)
+            
+            self.progress.emit(100, 100, "Instalación completada")
+            self.finished.emit(profile_id)
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.error.emit(f"Error durante la instalación: {str(e)}")
+    
+    def _install_neoforge(self, version_base, profile_dir, profile_name):
+        """Instala NeoForge usando el instalador en el perfil"""
+        installer_url = version_base.get("installer_url")
+        if not installer_url:
+            raise Exception("No se encontró URL del instalador de NeoForge")
+        
+        minecraft_version = version_base.get("minecraft_version")
+        neoforge_version = version_base.get("neoforge_version")
+        
+        # Primero instalar la versión vanilla base si es necesaria
+        self.progress.emit(10, 100, "Instalando versión Vanilla base...")
+        self._install_vanilla(version_base, profile_dir, profile_name)
+        
+        # Descargar instalador
+        self.progress.emit(20, 100, "Descargando instalador de NeoForge...")
+        installer_path = os.path.join(profile_dir, "neoforge-installer.jar")
+        response = requests.get(installer_url, stream=True, timeout=60)
+        response.raise_for_status()
+        
+        with open(installer_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+        
+        # Ejecutar instalador silenciosamente apuntando a profile_dir
+        # El instalador de NeoForge usa el directorio actual de trabajo como base
+        java_path = self._find_java()
+        if not java_path:
+            raise Exception("No se encontró Java para ejecutar el instalador")
+        
+        # Crear estructura de carpetas necesaria en el perfil
+        versions_dir = os.path.join(profile_dir, "versions")
+        libraries_dir = os.path.join(profile_dir, "libraries")
+        os.makedirs(versions_dir, exist_ok=True)
+        os.makedirs(libraries_dir, exist_ok=True)
+        
+        # El instalador crea la versión con el formato: neoforge-{neoforge_version}
+        expected_version_id = f"neoforge-{neoforge_version}"
+        
+        # Crear el archivo launcher_profiles.json que el instalador de NeoForge necesita
+        # El instalador busca este archivo para verificar que es un directorio de Minecraft válido
+        launcher_profiles_path = os.path.join(profile_dir, "launcher_profiles.json")
+        if not os.path.exists(launcher_profiles_path):
+            launcher_profiles = {
+                "profiles": {
+                    "profile": {
+                        "name": profile_name,  # Usar el nombre del perfil del JSON del servidor
+                        "lastVersionId": expected_version_id  # Usar la versión de NeoForge que se instalará
+                    }
+                },
+                "settings": {
+                    "locale": "es_ES"
+                },
+                "version": 2
+            }
+            with open(launcher_profiles_path, 'w', encoding='utf-8') as f:
+                json.dump(launcher_profiles, f, indent=2)
+            print(f"[INFO] Creado launcher_profiles.json en el perfil con nombre: {profile_name}")
+        
+        # Forzar que el instalador use el perfil como directorio base
+        # El instalador de NeoForge acepta --installClient [File] donde File es el directorio de instalación
+        profile_dir_abs = os.path.abspath(profile_dir)
+        cmd = [
+            java_path, "-jar", installer_path,
+            "--installClient", profile_dir_abs
+        ]
+        
+        # Configurar variables de entorno para forzar la instalación en el perfil
+        env = os.environ.copy()
+        env["MINECRAFT_DIR"] = profile_dir_abs
+        env["INSTALL_DIR"] = profile_dir_abs
+        env["MCP_DIR"] = profile_dir_abs
+        
+        print(f"[DEBUG] Ejecutando instalador de NeoForge: {' '.join(cmd)}")
+        print(f"[DEBUG] Directorio de trabajo: {profile_dir_abs}")
+        print(f"[DEBUG] MINECRAFT_DIR: {profile_dir_abs}")
+        
+        # Ejecutar el instalador desde el directorio del perfil
+        self.progress.emit(30, 100, "Ejecutando instalador de NeoForge...")
+        result = subprocess.run(
+            cmd,
+            cwd=profile_dir_abs,  # Cambiar directorio de trabajo al perfil (absoluto)
+            env=env,  # Pasar variables de entorno modificadas
+            capture_output=True,
+            text=True,
+            timeout=300,
+            creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0
+        )
+        
+        print(f"[DEBUG] Código de retorno: {result.returncode}")
+        if result.stdout:
+            print(f"[DEBUG] stdout: {result.stdout}")
+        if result.stderr:
+            print(f"[DEBUG] stderr: {result.stderr}")
+        
+        if result.returncode != 0:
+            error_msg = result.stderr if result.stderr else result.stdout if result.stdout else "Error desconocido"
+            raise Exception(f"Error ejecutando instalador de NeoForge (código {result.returncode}): {error_msg}")
+        
+        # Verificar que se instaló directamente en el perfil
+        import shutil
+        # El instalador crea la versión con el formato: neoforge-{neoforge_version}
+        # Por ejemplo: neoforge-21.1.215 (no incluye la versión de Minecraft)
+        expected_version_id = f"neoforge-{neoforge_version}"
+        
+        self.progress.emit(40, 100, "Verificando instalación en el perfil...")
+        
+        # Verificar que la versión se instaló en el perfil
+        version_json_path = os.path.join(profile_dir, "versions", expected_version_id, f"{expected_version_id}.json")
+        if not os.path.exists(version_json_path):
+            raise Exception(
+                f"El instalador no instaló la versión en el perfil.\n"
+                f"Buscado en: {version_json_path}\n"
+                f"El instalador debe usar --installClient para instalar en el perfil."
+            )
+        
+        print(f"[INFO] JSON de versión NeoForge encontrado en perfil: {version_json_path}")
+        
+        # Verificar que el JAR cliente se instaló en el perfil
+        client_jar_path = os.path.join(
+            profile_dir, 
+            "libraries", 
+            "net", 
+            "neoforged", 
+            "neoforge", 
+            neoforge_version,
+            f"neoforge-{neoforge_version}-client.jar"
+        )
+        
+        if not os.path.exists(client_jar_path):
+            raise Exception(
+                f"El instalador no instaló el JAR cliente en el perfil.\n"
+                f"Buscado en: {client_jar_path}\n"
+                f"El instalador debe usar --installClient para instalar en el perfil."
+            )
+        
+        print(f"[INFO] JAR cliente de NeoForge encontrado en perfil: {client_jar_path}")
+        
+        # Leer el JSON para obtener las librerías necesarias
+        with open(version_json_path, 'r', encoding='utf-8') as f:
+            version_json = json.load(f)
+        
+        # Copiar el JAR cliente a la carpeta de versiones (formato esperado)
+        target_version_dir = os.path.join(profile_dir, "versions", expected_version_id)
+        os.makedirs(target_version_dir, exist_ok=True)
+        
+        target_jar = os.path.join(target_version_dir, f"{expected_version_id}.jar")
+        shutil.copy2(client_jar_path, target_jar)
+        print(f"[INFO] JAR cliente copiado a versiones: {target_jar}")
+        
+        # Descargar todas las librerías necesarias (incluyendo heredadas)
+        self.progress.emit(60, 100, "Descargando librerías de NeoForge...")
+        
+        # Recopilar todas las librerías incluyendo las heredadas
+        all_libraries = []
+        visited_versions = set()
+        
+        def collect_libraries(v_json, visited):
+            """Recopila librerías de forma recursiva incluyendo versiones heredadas"""
+            if "inheritsFrom" in v_json:
+                parent_version = v_json["inheritsFrom"]
+                if parent_version not in visited:
+                    visited.add(parent_version)
+                    # Cargar versión padre desde el perfil
+                    parent_version_dir = os.path.join(profile_dir, "versions", parent_version)
+                    parent_json_path = os.path.join(parent_version_dir, f"{parent_version}.json")
+                    if os.path.exists(parent_json_path):
+                        with open(parent_json_path, 'r', encoding='utf-8') as f:
+                            parent_json = json.load(f)
+                        collect_libraries(parent_json, visited)
+            
+            # Agregar librerías de esta versión
+            for lib in v_json.get('libraries', []):
+                all_libraries.append(lib)
+        
+        collect_libraries(version_json, visited_versions)
+        
+        total_libs = len(all_libraries)
+        for i, library in enumerate(all_libraries):
+            progress = 60 + int((i / total_libs) * 30) if total_libs > 0 else 60
+            self.progress.emit(progress, 100, f"Descargando librerías ({i + 1}/{total_libs})...")
+            self._download_library(library, libraries_dir, 0, 100)
+        
+        # Verificar que los archivos existen
+        if not os.path.exists(version_json_path):
+            raise Exception(f"No se encontró el JSON de NeoForge en profile_dir")
+        if not os.path.exists(target_jar):
+            raise Exception(f"No se encontró el JAR cliente de NeoForge en profile_dir")
+        
+        # Actualizar launcher_profiles.json con el lastVersionId correcto (neoforge-21.1.215)
+        launcher_profiles_path = os.path.join(profile_dir, "launcher_profiles.json")
+        if os.path.exists(launcher_profiles_path):
+            try:
+                with open(launcher_profiles_path, 'r', encoding='utf-8') as f:
+                    launcher_profiles = json.load(f)
+                # Actualizar lastVersionId con la versión de NeoForge instalada
+                if "profiles" in launcher_profiles:
+                    for profile_key in launcher_profiles["profiles"]:
+                        launcher_profiles["profiles"][profile_key]["lastVersionId"] = expected_version_id
+                with open(launcher_profiles_path, 'w', encoding='utf-8') as f:
+                    json.dump(launcher_profiles, f, indent=2)
+                print(f"[INFO] Actualizado launcher_profiles.json con lastVersionId: {expected_version_id}")
+            except Exception as e:
+                print(f"[WARN] Error actualizando launcher_profiles.json: {e}")
+        
+        print(f"[INFO] Versión NeoForge instalada exitosamente en profile_dir")
+        
+        # Limpiar instalador temporal
+        try:
+            os.remove(installer_path)
+        except:
+            pass
+    
+    def _install_vanilla(self, version_base, profile_dir, profile_name):
+        """Instala versión Vanilla en el perfil"""
+        minecraft_version = version_base.get("minecraft_version")
+        if not minecraft_version:
+            raise Exception("No se especificó versión de Minecraft")
+        
+        # Crear el archivo launcher_profiles.json si no existe
+        launcher_profiles_path = os.path.join(profile_dir, "launcher_profiles.json")
+        if not os.path.exists(launcher_profiles_path):
+            launcher_profiles = {
+                "profiles": {
+                    "profile": {
+                        "name": profile_name,  # Usar el nombre del perfil del JSON del servidor
+                        "lastVersionId": minecraft_version
+                    }
+                },
+                "settings": {
+                    "locale": "es_ES"
+                },
+                "version": 2
+            }
+            with open(launcher_profiles_path, 'w', encoding='utf-8') as f:
+                json.dump(launcher_profiles, f, indent=2)
+            print(f"[INFO] Creado launcher_profiles.json en el perfil con nombre: {profile_name}")
+        
+        # Obtener manifest de versiones
+        manifest_url = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
+        response = requests.get(manifest_url, timeout=30)
+        response.raise_for_status()
+        manifest = response.json()
+        
+        # Buscar la versión en el manifest
+        version_info = None
+        for version in manifest.get("versions", []):
+            if version.get("id") == minecraft_version:
+                version_info = version
+                break
+        
+        if not version_info:
+            raise Exception(f"Versión {minecraft_version} no encontrada en el manifest")
+        
+        # Descargar JSON de la versión
+        version_json_url = version_info.get("url")
+        response = requests.get(version_json_url, timeout=30)
+        response.raise_for_status()
+        version_json = response.json()
+        
+        # Crear directorio de versión dentro del perfil
+        version_id = minecraft_version  # Usar el ID real de la versión
+        versions_dir = os.path.join(profile_dir, "versions", version_id)
+        os.makedirs(versions_dir, exist_ok=True)
+        
+        # Guardar JSON
+        json_path = os.path.join(versions_dir, f"{version_id}.json")
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(version_json, f, indent=2)
+        
+        # Descargar client.jar
+        downloads = version_json.get("downloads", {})
+        client_info = downloads.get("client")
+        if client_info:
+            jar_url = client_info.get("url")
+            jar_path = os.path.join(versions_dir, f"{version_id}.jar")
+            
+            response = requests.get(jar_url, stream=True, timeout=60)
+            response.raise_for_status()
+            
+            with open(jar_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+        
+        # Descargar todas las librerías necesarias (incluyendo heredadas)
+        libraries_dir = os.path.join(profile_dir, "libraries")
+        os.makedirs(libraries_dir, exist_ok=True)
+        
+        # Recopilar todas las librerías incluyendo las heredadas
+        all_libraries = []
+        visited_versions = set()
+        
+        def collect_libraries(v_json, visited):
+            """Recopila librerías de forma recursiva incluyendo versiones heredadas"""
+            if "inheritsFrom" in v_json:
+                parent_version = v_json["inheritsFrom"]
+                if parent_version not in visited:
+                    visited.add(parent_version)
+                    # Cargar versión padre desde el perfil
+                    parent_version_dir = os.path.join(profile_dir, "versions", parent_version)
+                    parent_json_path = os.path.join(parent_version_dir, f"{parent_version}.json")
+                    if os.path.exists(parent_json_path):
+                        with open(parent_json_path, 'r', encoding='utf-8') as f:
+                            parent_json = json.load(f)
+                        collect_libraries(parent_json, visited)
+            
+            # Agregar librerías de esta versión
+            for lib in v_json.get('libraries', []):
+                all_libraries.append(lib)
+        
+        collect_libraries(version_json, visited_versions)
+        
+        total_libs = len(all_libraries)
+        for i, library in enumerate(all_libraries):
+            self._download_library(library, libraries_dir, 0, 100)
+    
+    def _maven_name_to_path(self, name):
+        """Convierte un nombre Maven (group:artifact:version) a ruta de archivo"""
+        parts = name.split(':')
+        if len(parts) < 3:
+            return None
+        
+        group_id = parts[0].replace('.', '/')
+        artifact_id = parts[1]
+        version = parts[2]
+        
+        # Construir ruta: group/artifact/version/artifact-version.jar
+        path = f"{group_id}/{artifact_id}/{version}/{artifact_id}-{version}.jar"
+        return path
+    
+    def _download_library(self, library, libraries_dir, progress_base, progress_max):
+        """Descarga una librería individual (para InstallProfileThread)"""
+        # Verificar reglas
+        if not self._should_include_library(library):
+            return True  # Librería excluida por reglas, no es un error
+        
+        # Obtener información de descarga
+        downloads = library.get("downloads", {})
+        artifact = downloads.get("artifact")
+        
+        lib_name = library.get("name", "")
+        if not lib_name:
+            return True  # No hay nombre, saltar
+        
+        # Construir path desde name
+        lib_path = self._maven_name_to_path(lib_name)
+        if not lib_path:
+            return True  # No se pudo construir path, saltar
+        
+        # Verificar si ya existe
+        full_path = os.path.join(libraries_dir, lib_path)
+        if os.path.exists(full_path):
+            return True  # Ya existe, no descargar
+        
+        # Obtener URL y path
+        lib_url = None
+        if artifact:
+            lib_url = artifact.get("url")
+            # Si hay path en artifact, usarlo (puede ser diferente al construido)
+            artifact_path = artifact.get("path")
+            if artifact_path:
+                lib_path = artifact_path
+                full_path = os.path.join(libraries_dir, lib_path)
+                # Verificar de nuevo con el path del artifact
+                if os.path.exists(full_path):
+                    return True
+        
+        # Si no hay URL explícita, intentar construirla desde el nombre Maven
+        if not lib_url:
+            # Construir URL desde repositorios Maven
+            # Intentar primero con libraries.minecraft.net (para librerías de Mojang)
+            # Luego con maven.neoforged.net (para librerías de NeoForge)
+            # Finalmente con repo1.maven.org (Maven Central)
+            repos = [
+                f"https://libraries.minecraft.net/{lib_path}",
+                f"https://maven.neoforged.net/releases/{lib_path}",
+                f"https://repo1.maven.org/maven2/{lib_path}"
+            ]
+            
+            # Intentar descargar desde cada repositorio hasta que uno funcione
+            for repo_url in repos:
+                try:
+                    # Verificar si existe haciendo un HEAD request
+                    head_response = requests.head(repo_url, timeout=10, allow_redirects=True)
+                    if head_response.status_code == 200:
+                        lib_url = repo_url
+                        print(f"[DEBUG] URL construida para {lib_name}: {lib_url}")
+                        break
+                except:
+                    continue
+            
+            if not lib_url:
+                print(f"[WARN] No se pudo encontrar URL para librería: {lib_name}")
+                return True  # No se pudo encontrar URL, saltar
+        
+        if not lib_url:
+            return True  # No hay URL, saltar
+        
+        # Crear directorio si no existe
+        lib_dir = os.path.dirname(full_path)
+        os.makedirs(lib_dir, exist_ok=True)
+        
+        # Descargar la librería
+        try:
+            response = requests.get(lib_url, stream=True, timeout=60)
+            response.raise_for_status()
+            
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded = 0
+            
+            with open(full_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+            
+            print(f"[DEBUG] Librería descargada: {lib_name} -> {full_path}")
+            return True
+        except Exception as e:
+            print(f"[WARN] Error descargando librería {lib_path}: {e}")
+            # Si falla, eliminar archivo parcial
+            if os.path.exists(full_path):
+                try:
+                    os.remove(full_path)
+                except:
+                    pass
+            return False  # Error al descargar
+    
+    def _should_include_library(self, library):
+        """Verifica si una librería debe incluirse según las reglas del OS"""
+        if "rules" not in library:
+            return True
+        
+        for rule in library.get("rules", []):
+            action = rule.get("action", "allow")
+            if "os" in rule:
+                os_rule = rule["os"]
+                os_name = os_rule.get("name", "").lower()
+                current_os = self.system.lower()
+                
+                if current_os == "windows":
+                    current_os = "windows"
+                elif current_os == "darwin":
+                    current_os = "osx"
+                elif current_os == "linux":
+                    current_os = "linux"
+                
+                if os_name and os_name != current_os:
+                    if action == "allow":
+                        return False
+                    continue
+            
+            if action == "disallow":
+                return False
+        
+        return True
+    
+    def _get_base_url(self):
+        """Obtiene la URL base para descargar archivos"""
+        # Intentar usar server_url del JSON si está disponible
+        if self.profiles_data and "server_url" in self.profiles_data:
+            server_url = self.profiles_data.get("server_url", "").rstrip('/')
+            if server_url:
+                return server_url
+        
+        # Fallback: usar hostname con puerto 25080
+        if self.hostname:
+            return f"http://{self.hostname}:25080"
+        
+        return ""
+    
+    def _download_mods(self, mods, profile_dir):
+        """Descarga los mods del perfil"""
+        mods_dir = os.path.join(profile_dir, "mods")
+        base_url = self._get_base_url()
+        
+        for mod in mods:
+            mod_name = mod.get("name")
+            mod_url = mod.get("url")
+            if not mod_name or not mod_url:
+                continue
+            
+            # Si la URL es relativa, construirla con la URL base
+            if not mod_url.startswith("http"):
+                if base_url:
+                    # Asegurar que la URL relativa empiece con /
+                    if not mod_url.startswith("/"):
+                        mod_url = f"/{mod_url}"
+                    mod_url = f"{base_url}{mod_url}"
+                else:
+                    print(f"[WARN] No se puede construir URL para mod {mod_name}: falta hostname o server_url")
+                    continue
+            
+            mod_path = os.path.join(mods_dir, mod_name)
+            if os.path.exists(mod_path):
+                continue  # Ya existe
+            
+            try:
+                response = requests.get(mod_url, stream=True, timeout=60)
+                response.raise_for_status()
+                with open(mod_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+            except Exception as e:
+                print(f"[WARN] Error descargando mod {mod_name}: {e}")
+    
+    def _download_shaders(self, shaders, profile_dir):
+        """Descarga los shaders del perfil"""
+        shaders_dir = os.path.join(profile_dir, "shaderpacks")
+        base_url = self._get_base_url()
+        
+        for shader in shaders:
+            shader_name = shader.get("name")
+            shader_url = shader.get("url")
+            if not shader_name or not shader_url:
+                continue
+            
+            if not shader_url.startswith("http"):
+                if base_url:
+                    if not shader_url.startswith("/"):
+                        shader_url = f"/{shader_url}"
+                    shader_url = f"{base_url}{shader_url}"
+                else:
+                    print(f"[WARN] No se puede construir URL para shader {shader_name}: falta hostname o server_url")
+                    continue
+            
+            shader_path = os.path.join(shaders_dir, shader_name)
+            if os.path.exists(shader_path):
+                continue
+            
+            try:
+                response = requests.get(shader_url, stream=True, timeout=60)
+                response.raise_for_status()
+                with open(shader_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+            except Exception as e:
+                print(f"[WARN] Error descargando shader {shader_name}: {e}")
+    
+    def _download_resourcepacks(self, resourcepacks, profile_dir):
+        """Descarga los resource packs del perfil"""
+        rp_dir = os.path.join(profile_dir, "resourcepacks")
+        base_url = self._get_base_url()
+        
+        for rp in resourcepacks:
+            rp_name = rp.get("name")
+            rp_url = rp.get("url")
+            if not rp_name or not rp_url:
+                continue
+            
+            if not rp_url.startswith("http"):
+                if base_url:
+                    if not rp_url.startswith("/"):
+                        rp_url = f"/{rp_url}"
+                    rp_url = f"{base_url}{rp_url}"
+                else:
+                    print(f"[WARN] No se puede construir URL para resource pack {rp_name}: falta hostname o server_url")
+                    continue
+            
+            rp_path = os.path.join(rp_dir, rp_name)
+            if os.path.exists(rp_path):
+                continue
+            
+            try:
+                response = requests.get(rp_url, stream=True, timeout=60)
+                response.raise_for_status()
+                with open(rp_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+            except Exception as e:
+                print(f"[WARN] Error descargando resource pack {rp_name}: {e}")
+    
+    def _configure_options(self, profile_dir):
+        """Configura el archivo options.txt del perfil"""
+        options = self.profile.get("options", {})
+        if not options:
+            return
+        
+        options_path = os.path.join(profile_dir, "options.txt")
+        options_dict = {}
+        
+        # Leer options.txt existente si existe
+        if os.path.exists(options_path):
+            with open(options_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if ':' in line:
+                        key, value = line.split(':', 1)
+                        options_dict[key.strip()] = value.strip()
+        
+        # Actualizar con opciones del perfil
+        if "fov" in options:
+            options_dict["fov"] = str(options["fov"])
+        if "renderDistance" in options:
+            options_dict["renderDistance"] = str(options["renderDistance"])
+        if "maxFps" in options:
+            options_dict["maxFps"] = str(options["maxFps"])
+        if "guiScale" in options:
+            options_dict["guiScale"] = str(options["guiScale"])
+        
+        # Configurar shaders
+        if options.get("enable_shaders", False):
+            shader_pack = options.get("shader_pack", "")
+            if shader_pack:
+                # Remover extensión si la tiene
+                shader_pack = shader_pack.replace(".zip", "").replace(".jar", "")
+                options_dict["shaderPack"] = shader_pack
+        else:
+            options_dict["shaderPack"] = "OFF"
+        
+        # Configurar resource packs
+        if options.get("enable_resourcepacks", False):
+            resource_packs = options.get("resource_packs", [])
+            if resource_packs:
+                # Formato: resourcePacks:["pack1.zip","pack2.zip"]
+                packs_str = "[" + ",".join([f'"{p.replace(".zip", "").replace(".jar", "")}.zip"' for p in resource_packs]) + "]"
+                options_dict["resourcePacks"] = packs_str
+        else:
+            options_dict["resourcePacks"] = "[]"
+        
+        # Escribir options.txt
+        with open(options_path, 'w', encoding='utf-8') as f:
+            for key, value in options_dict.items():
+                f.write(f"{key}:{value}\n")
+    
+    def _find_java(self):
+        """Encuentra una instalación de Java"""
+        creationflags = subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0
+        
+        # Buscar java en PATH
+        java_names = ["java", "javaw"] if self.system == "Windows" else ["java"]
+        for java_name in java_names:
+            try:
+                result = subprocess.run(
+                    [java_name, "-version"],
+                    capture_output=True,
+                    timeout=5,
+                    creationflags=creationflags
+                )
+                if result.returncode == 0 or result.returncode == 1:  # Java muestra versión en stderr
+                    return java_name
+            except:
+                continue
+        
+        # Buscar en .minecraft/runtime (rutas multiplataforma)
+        runtime_base = os.path.join(self.minecraft_path, "runtime")
+        if os.path.exists(runtime_base):
+            # Buscar en subdirectorios comunes
+            for root, dirs, files in os.walk(runtime_base):
+                for file in files:
+                    if file in ["java.exe", "javaw.exe", "java"]:
+                        java_path = os.path.join(root, file)
+                        try:
+                            result = subprocess.run(
+                                [java_path, "-version"],
+                                capture_output=True,
+                                timeout=5,
+                                creationflags=creationflags
+                            )
+                            if result.returncode == 0 or result.returncode == 1:
+                                return java_path
+                        except:
+                            continue
+        
+        return None
+
+
 class CustomProfileDialog(QDialog):
     """Diálogo para instalar perfiles personalizados desde URL"""
     
@@ -1021,6 +1763,7 @@ class CustomProfileDialog(QDialog):
         self.minecraft_launcher = minecraft_launcher
         self.profiles_data = None
         self.hostname = None
+        self.install_thread = None
         
         self.setWindowTitle("Instalar Perfil Personalizado")
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
@@ -1283,6 +2026,31 @@ class CustomProfileDialog(QDialog):
             }
         """)
         button_layout.addWidget(cancel_button)
+        
+        # Barra de progreso para la instalación
+        self.install_progress_bar = QProgressBar()
+        self.install_progress_bar.setVisible(False)
+        self.install_progress_bar.setStyleSheet("""
+            QProgressBar {
+                background: #0f0a1a;
+                border: 2px solid #6d28d9;
+                border-radius: 5px;
+                height: 20px;
+                text-align: center;
+            }
+            QProgressBar::chunk {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #7c3aed, stop:1 #a78bfa);
+                border-radius: 3px;
+            }
+        """)
+        button_layout.addWidget(self.install_progress_bar)
+        
+        self.install_progress_label = QLabel("")
+        self.install_progress_label.setAlignment(Qt.AlignCenter)
+        self.install_progress_label.setVisible(False)
+        self.install_progress_label.setStyleSheet("color: #e9d5ff; font-size: 11px;")
+        button_layout.addWidget(self.install_progress_label)
         
         self.install_button = QPushButton("Instalar")
         self.install_button.setEnabled(False)
@@ -1560,12 +2328,71 @@ class CustomProfileDialog(QDialog):
         if not profile:
             return
         
-        # Por ahora solo mostrar mensaje - se implementará después
-        QMessageBox.information(
+        if not self.hostname:
+            QMessageBox.warning(self, "Error", "No se ha cargado información del servidor")
+            return
+        
+        # Confirmar instalación
+        reply = QMessageBox.question(
             self,
-            "Instalación",
-            f"La instalación del perfil '{profile.get('name', 'Sin nombre')}' se implementará próximamente."
+            "Confirmar Instalación",
+            f"¿Deseas instalar el perfil '{profile.get('name', 'Sin nombre')}'?\n\n"
+            f"Se creará en: .minecraft/profiles/{profile.get('id', 'unknown')}",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
         )
+        
+        if reply != QMessageBox.Yes:
+            return
+        
+        # Deshabilitar botón durante la instalación
+        self.install_button.setEnabled(False)
+        self.install_progress_bar.setVisible(True)
+        self.install_progress_bar.setRange(0, 100)
+        self.install_progress_bar.setValue(0)
+        self.install_progress_label.setVisible(True)
+        self.install_progress_label.setText("Preparando instalación...")
+        
+        # Crear y conectar thread de instalación
+        self.install_thread = InstallProfileThread(
+            profile,
+            self.hostname,
+            self.minecraft_launcher.minecraft_path,
+            self.profiles_data
+        )
+        self.install_thread.progress.connect(self.on_install_progress)
+        self.install_thread.finished.connect(self.on_install_finished)
+        self.install_thread.error.connect(self.on_install_error)
+        self.install_thread.start()
+    
+    def on_install_progress(self, progress, total, message):
+        """Actualiza el progreso de la instalación"""
+        self.install_progress_bar.setValue(progress)
+        self.install_progress_label.setText(message)
+    
+    def on_install_finished(self, profile_id):
+        """Se llama cuando la instalación se completa"""
+        self.install_progress_bar.setValue(100)
+        self.install_progress_label.setText("Instalación completada")
+        self.install_button.setEnabled(True)
+        self.install_progress_bar.setVisible(False)
+        self.install_progress_label.setVisible(False)
+        
+        # Cerrar el diálogo
+        self.accept()
+        
+        # Recargar versiones en la ventana principal
+        if self.parent():
+            parent_window = self.parent()
+            if hasattr(parent_window, 'load_versions_async'):
+                parent_window.load_versions_async()
+    
+    def on_install_error(self, error):
+        """Se llama cuando hay un error en la instalación"""
+        self.install_progress_bar.setVisible(False)
+        self.install_progress_label.setVisible(False)
+        self.install_button.setEnabled(True)
+        QMessageBox.critical(self, "Error de Instalación", f"Error durante la instalación:\n{error}")
 
 # ServerManagerDialog movido a server_manager.py
 
@@ -1658,6 +2485,7 @@ class LauncherWindow(QMainWindow):
     
     def __init__(self):
         super().__init__()
+        # Inicializar solo lo esencial para mostrar la ventana rápido
         self.auth_manager = AuthManager()
         self.credential_storage = CredentialStorage()
         self.minecraft_launcher = MinecraftLauncher()
@@ -1669,17 +2497,31 @@ class LauncherWindow(QMainWindow):
         self.old_pos = None  # Para arrastrar la ventana
         self.title_bar = None  # Referencia a la barra de título
         
-        # Inicializar archivo de configuración si no existe
-        self.load_last_selected_version()
+        # Valores por defecto (se cargarán después de mostrar la ventana)
+        self.developer_mode = False
         
-        # Cargar modo desarrollador
-        self.developer_mode = self.load_developer_mode()
-        
+        # Inicializar UI básica (sin cargar imágenes pesadas)
         self.init_ui()
         
-        # Inicializar widget de usuario
+        # Inicializar widget de usuario con valores por defecto
         self.update_user_widget(None)
         
+        # Diferir operaciones pesadas hasta después de mostrar la ventana
+        # Usar QTimer para ejecutar después de que el evento loop esté corriendo
+        from PyQt5.QtCore import QTimer
+        QTimer.singleShot(0, self._deferred_initialization)
+    
+    def _deferred_initialization(self):
+        """Inicialización diferida: operaciones que no son críticas para mostrar la ventana"""
+        # Cargar configuración (operaciones de archivo rápidas)
+        self.load_last_selected_version()
+        self.developer_mode = self.load_developer_mode()
+        
+        # Cargar imagen de fondo de forma diferida
+        if self._bg_label:
+            self._load_background_image("default")
+        
+        # Cargar credenciales guardadas (puede hacer llamadas de red)
         self.load_saved_credentials()
         
         # Cargar versiones después de mostrar la ventana
@@ -1759,9 +2601,7 @@ class LauncherWindow(QMainWindow):
         # Método para cargar imagen de fondo (debe definirse después de crear _bg_label)
         self._load_background_image = self._create_bg_loader()
         
-        # Cargar la imagen de fondo por defecto
-        if self._bg_label:
-            self._load_background_image("default")
+        # La imagen de fondo se cargará de forma diferida en _deferred_initialization()
         
         # Aplicar estilos base
         base_style = """
@@ -2260,6 +3100,53 @@ class LauncherWindow(QMainWindow):
         
         return organized, version_to_index
     
+    def _get_custom_profiles(self):
+        """Obtiene la lista de perfiles custom instalados"""
+        profiles = []
+        profiles_dir = os.path.join(self.minecraft_launcher.minecraft_path, "profiles")
+        
+        if not os.path.exists(profiles_dir):
+            return profiles
+        
+        for profile_id in os.listdir(profiles_dir):
+            profile_path = os.path.join(profiles_dir, profile_id)
+            if os.path.isdir(profile_path):
+                # Buscar el archivo launcher_profiles.json para obtener el nombre
+                launcher_profiles_path = os.path.join(profile_path, "launcher_profiles.json")
+                profile_name = profile_id  # Por defecto usar el ID
+                
+                if os.path.exists(launcher_profiles_path):
+                    try:
+                        with open(launcher_profiles_path, 'r', encoding='utf-8') as f:
+                            launcher_profiles = json.load(f)
+                            # Intentar obtener el nombre del perfil
+                            profiles_data = launcher_profiles.get("profiles", {})
+                            if profiles_data:
+                                # Tomar el primer perfil
+                                first_profile = list(profiles_data.values())[0]
+                                profile_name = first_profile.get("name", profile_id)
+                    except:
+                        pass
+                
+                # Verificar que tenga una versión instalada
+                versions_dir = os.path.join(profile_path, "versions")
+                if os.path.exists(versions_dir):
+                    # Buscar cualquier versión instalada
+                    for version_folder in os.listdir(versions_dir):
+                        version_path = os.path.join(versions_dir, version_folder)
+                        if os.path.isdir(version_path):
+                            version_json = os.path.join(version_path, f"{version_folder}.json")
+                            if os.path.exists(version_json):
+                                # Este perfil tiene una versión instalada
+                                profiles.append({
+                                    "id": profile_id,
+                                    "name": profile_name,
+                                    "path": profile_path
+                                })
+                                break
+        
+        return profiles
+    
     def on_versions_loaded(self, versions):
         """Se llama cuando las versiones se han cargado"""
         # Ocultar barra de progreso
@@ -2285,11 +3172,21 @@ class LauncherWindow(QMainWindow):
         
         self.version_combo.clear()
         
+        # Primero agregar perfiles custom (sin jerarquía, al principio)
+        custom_profiles = self._get_custom_profiles()
+        profile_count = 0
+        for profile in custom_profiles:
+            display_name = f"Perfil {profile['name']}"
+            # Usar un formato especial para identificar perfiles custom: "profile:{profile_id}"
+            profile_id = f"profile:{profile['id']}"
+            self.version_combo.addItem(display_name, profile_id)
+            profile_count += 1
+        
         if versions:
             # Organizar versiones en árbol
             organized_versions, version_to_index = self._organize_versions_tree(versions)
             
-            # Agregar versiones organizadas al combo
+            # Agregar versiones organizadas al combo (después de los perfiles custom)
             for display_name, version_id in organized_versions:
                 self.version_combo.addItem(display_name, version_id)
             
@@ -2750,11 +3647,43 @@ class LauncherWindow(QMainWindow):
             self.java_required_label.setText("")
             return
         
+        # Detectar si es un perfil custom
+        game_dir = None
+        actual_version_id = version_id
+        if version_id.startswith("profile:"):
+            profile_id = version_id.replace("profile:", "")
+            game_dir = os.path.join(self.minecraft_launcher.minecraft_path, "profiles", profile_id)
+            # Leer launcher_profiles.json para obtener lastVersionId
+            launcher_profiles_path = os.path.join(game_dir, "launcher_profiles.json")
+            if os.path.exists(launcher_profiles_path):
+                try:
+                    with open(launcher_profiles_path, 'r', encoding='utf-8') as f:
+                        launcher_profiles = json.load(f)
+                    profiles_data = launcher_profiles.get("profiles", {})
+                    if profiles_data:
+                        # Tomar el primer perfil y obtener lastVersionId
+                        first_profile = list(profiles_data.values())[0]
+                        last_version_id = first_profile.get("lastVersionId")
+                        if last_version_id:
+                            actual_version_id = last_version_id
+                except Exception as e:
+                    print(f"[WARN] Error leyendo launcher_profiles.json: {e}")
+                    # Fallback: buscar cualquier versión instalada
+                    versions_dir = os.path.join(game_dir, "versions")
+                    if os.path.exists(versions_dir):
+                        for version_folder in os.listdir(versions_dir):
+                            version_path = os.path.join(versions_dir, version_folder)
+                            if os.path.isdir(version_path):
+                                version_json_file = os.path.join(version_path, f"{version_folder}.json")
+                                if os.path.exists(version_json_file):
+                                    actual_version_id = version_folder
+                                    break
+        
         # Detectar tipo de versión y cambiar fondo si es necesario
-        self._update_background_for_version(version_id, version_name)
+        self._update_background_for_version(actual_version_id, version_name)
         
         # Cargar el JSON de la versión para obtener los requisitos de Java
-        version_json = self.minecraft_launcher._load_version_json(version_id)
+        version_json = self.minecraft_launcher._load_version_json(actual_version_id, game_dir=game_dir)
         if version_json:
             required_java = self.minecraft_launcher.get_required_java_version(version_json)
             if required_java:
@@ -3174,8 +4103,71 @@ class LauncherWindow(QMainWindow):
             QMessageBox.warning(self, "Error", "Por favor, selecciona una versión de Minecraft")
             return
         
+        # Detectar si es un perfil custom (formato: "profile:{profile_id}")
+        game_dir = None
+        actual_version = selected_version
+        if selected_version.startswith("profile:"):
+            profile_id = selected_version.replace("profile:", "")
+            game_dir = os.path.join(self.minecraft_launcher.minecraft_path, "profiles", profile_id)
+            print(f"[DEBUG] Perfil custom detectado: {profile_id}, game_dir: {game_dir}")
+            # Leer launcher_profiles.json para obtener lastVersionId
+            launcher_profiles_path = os.path.join(game_dir, "launcher_profiles.json")
+            if os.path.exists(launcher_profiles_path):
+                try:
+                    with open(launcher_profiles_path, 'r', encoding='utf-8') as f:
+                        launcher_profiles = json.load(f)
+                    profiles_data = launcher_profiles.get("profiles", {})
+                    print(f"[DEBUG] Perfiles encontrados en launcher_profiles.json: {list(profiles_data.keys())}")
+                    if profiles_data:
+                        # Buscar el perfil con lastVersionId (preferir "NeoForge" o cualquier perfil con lastVersionId)
+                        last_version_id = None
+                        for profile_key, profile_data in profiles_data.items():
+                            if isinstance(profile_data, dict):
+                                candidate_version = profile_data.get("lastVersionId")
+                                if candidate_version:
+                                    last_version_id = candidate_version
+                                    print(f"[DEBUG] Encontrado lastVersionId en perfil '{profile_key}': {last_version_id}")
+                                    break
+                        
+                        if last_version_id:
+                            actual_version = last_version_id
+                            print(f"[INFO] Usando versión del perfil: {actual_version}")
+                        else:
+                            print(f"[WARN] No se encontró lastVersionId en ningún perfil")
+                except Exception as e:
+                    print(f"[WARN] Error leyendo launcher_profiles.json: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    # Fallback: buscar cualquier versión instalada
+                    versions_dir = os.path.join(game_dir, "versions")
+                    if os.path.exists(versions_dir):
+                        for version_folder in os.listdir(versions_dir):
+                            version_path = os.path.join(versions_dir, version_folder)
+                            if os.path.isdir(version_path):
+                                version_json_file = os.path.join(version_path, f"{version_folder}.json")
+                                if os.path.exists(version_json_file):
+                                    actual_version = version_folder
+                                    print(f"[DEBUG] Fallback: usando versión encontrada: {actual_version}")
+                                    break
+            else:
+                print(f"[WARN] No se encontró launcher_profiles.json en: {launcher_profiles_path}")
+        
+        print(f"[DEBUG] Versión final a usar: {actual_version}, game_dir: {game_dir}")
+        
+        # Si es un perfil custom, verificar que todas las librerías estén descargadas
+        if game_dir:
+            self.add_message("Verificando que todas las librerías estén descargadas...")
+            if not self.minecraft_launcher.is_profile_version_downloaded(actual_version, game_dir, strict=True):
+                QMessageBox.warning(
+                    self,
+                    "Librerías incompletas",
+                    f"El perfil no tiene todas las librerías necesarias descargadas.\n\n"
+                    f"Por favor, reinstala el perfil o verifica que la instalación se completó correctamente."
+                )
+                return
+        
         # Verificar requisitos de Java
-        version_json = self.minecraft_launcher._load_version_json(selected_version)
+        version_json = self.minecraft_launcher._load_version_json(actual_version, game_dir=game_dir)
         required_java = None
         if version_json:
             required_java = self.minecraft_launcher.get_required_java_version(version_json)
@@ -3231,10 +4223,10 @@ class LauncherWindow(QMainWindow):
                             # Recargar versiones de Java
                             self.load_java_versions()
                             # Continuar con el lanzamiento
-                            self.add_message(f"Lanzando Minecraft version: {selected_version}")
+                            self.add_message(f"Lanzando Minecraft version: {actual_version}")
                             self.add_message(f"Usando Java: {java_path}")
                             self.launch_button.setEnabled(False)
-                            success_launch, _ = self.minecraft_launcher.launch_minecraft(credentials, selected_version, java_path)
+                            success_launch, _ = self.minecraft_launcher.launch_minecraft(credentials, actual_version, java_path, game_dir=game_dir)
                             if success_launch:
                                 self.add_message("Minecraft proceso iniciado correctamente")
                                 self.add_message("El juego deberia abrirse en breve...")
@@ -3260,12 +4252,14 @@ class LauncherWindow(QMainWindow):
             elif suitable_java:
                 selected_java_path = suitable_java
         
-        self.add_message(f"Lanzando Minecraft version: {selected_version}")
+        self.add_message(f"Lanzando Minecraft version: {actual_version}")
         if selected_java_path:
             self.add_message(f"Usando Java: {selected_java_path}")
+        if game_dir:
+            self.add_message(f"Usando perfil custom: {game_dir}")
         self.launch_button.setEnabled(False)
         
-        success, detected_java_version = self.minecraft_launcher.launch_minecraft(credentials, selected_version, selected_java_path)
+        success, detected_java_version = self.minecraft_launcher.launch_minecraft(credentials, actual_version, selected_java_path, game_dir=game_dir)
         
         if success:
             self.add_message("Minecraft proceso iniciado correctamente")
@@ -3279,7 +4273,7 @@ class LauncherWindow(QMainWindow):
             self.launch_button.setEnabled(True)
             
             # Obtener mensaje de error más específico y ofrecer descargar Java si es necesario
-            version_json = self.minecraft_launcher._load_version_json(selected_version)
+            version_json = self.minecraft_launcher._load_version_json(actual_version, game_dir=game_dir)
             required_java = None
             if version_json:
                 required_java = self.minecraft_launcher.get_required_java_version(version_json)
@@ -3339,7 +4333,7 @@ class LauncherWindow(QMainWindow):
                                     # Intentar lanzar de nuevo con la Java descargada
                                     self.add_message(f"Reintentando lanzar con Java {required_java}...")
                                     self.launch_button.setEnabled(False)
-                                    success_launch, _ = self.minecraft_launcher.launch_minecraft(credentials, selected_version, java_path)
+                                    success_launch, _ = self.minecraft_launcher.launch_minecraft(credentials, actual_version, java_path, game_dir=game_dir)
                                     if success_launch:
                                         self.add_message("Minecraft proceso iniciado correctamente")
                                         self.add_message("El juego deberia abrirse en breve...")

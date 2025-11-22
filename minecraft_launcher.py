@@ -266,15 +266,20 @@ class MinecraftLauncher:
         
         return None
     
-    def launch_minecraft(self, credentials: Dict, version: str = "latest", java_path: Optional[str] = None) -> Tuple[bool, Optional[int]]:
+    def launch_minecraft(self, credentials: Dict, version: str = "latest", java_path: Optional[str] = None, game_dir: Optional[str] = None) -> Tuple[bool, Optional[int]]:
         """
         Lanza Minecraft con las credenciales proporcionadas
         
         Args:
             credentials: Diccionario con access_token, username, uuid
             version: Versión de Minecraft a lanzar
+            java_path: Ruta al ejecutable de Java (opcional)
+            game_dir: Directorio del juego (opcional, para perfiles custom)
         """
         try:
+            # Usar game_dir si se proporciona, sino usar el directorio estándar
+            actual_game_dir = game_dir if game_dir else self.minecraft_path
+            
             # Usar la versión proporcionada o detectar automáticamente
             if version == "latest":
                 detected_version = self._detect_minecraft_version()
@@ -286,9 +291,11 @@ class MinecraftLauncher:
                 selected_version = version
             
             print(f"Versión seleccionada: {selected_version}")
+            if game_dir:
+                print(f"Directorio del juego (perfil custom): {game_dir}")
             
-            # Leer archivo de versión JSON
-            version_json = self._load_version_json(selected_version)
+            # Leer archivo de versión JSON (usar game_dir si es un perfil custom)
+            version_json = self._load_version_json(selected_version, game_dir=actual_game_dir)
             if not version_json:
                 print(f"Error: No se pudo cargar el archivo de versión {selected_version}")
                 return False
@@ -326,7 +333,7 @@ class MinecraftLauncher:
             
             # CRÍTICO: Extraer nativos desde JARs a directorio temporal único (como el launcher oficial)
             # Esto evita que Java escanee directorios basura en .minecraft/bin/
-            natives_hash_dir = self._extract_natives_to_temp_directory(version_json, selected_version)
+            natives_hash_dir = self._extract_natives_to_temp_directory(version_json, selected_version, game_dir=game_dir)
             if not natives_hash_dir:
                 print("[WARN] No se pudo crear el directorio temporal de nativos, usando directorio estándar")
             
@@ -341,7 +348,7 @@ class MinecraftLauncher:
             # Si se usa módulo path, construir SOLO con los JARs explícitos del JSON
             # CRÍTICO: No agregar carpetas ni JARs que no estén en la lista original
             if uses_module_path:
-                libraries_dir = os.path.join(self.minecraft_path, "libraries")
+                libraries_dir = os.path.join(actual_game_dir, "libraries")
                 classpath_separator = ";" if self.system == "Windows" else ":"
                 
                 # DEPURACIÓN: Listar contenido del directorio de librerías
@@ -443,12 +450,12 @@ class MinecraftLauncher:
                                     print(f"[SKIP] Contiene patrón problemático: {nombre}")
                                     continue
                                 
-                                # Verificar que esté dentro del directorio de librerías (seguridad)
+                                # Verificar que esté dentro del directorio de librerías del perfil (seguridad)
                                 try:
                                     jar_path_real = os.path.realpath(jar_path)
                                     libraries_dir_real = os.path.realpath(libraries_dir)
                                     if not jar_path_real.startswith(libraries_dir_real):
-                                        print(f"[SKIP] JAR fuera del directorio de librerías: {jar_path}")
+                                        print(f"[SKIP] JAR fuera del directorio de librerías del perfil: {jar_path}")
                                         continue
                                 
                                     # CRÍTICO: Usar ruta real para detectar duplicados (case-insensitive en Windows)
@@ -555,7 +562,7 @@ class MinecraftLauncher:
             # El launcher oficial SIEMPRE pasa -cp con TODAS las libraries + el JAR de la versión
             # Incluso cuando se usa -p (module path), ambos se pasan simultáneamente
             print("[INFO] Construyendo classpath completo desde todas las libraries + JAR de versión")
-            classpath = self._build_classpath(version_json, selected_version)
+            classpath = self._build_classpath(version_json, selected_version, game_dir=actual_game_dir)
             
             if not classpath or not classpath.strip():
                 print("[ERROR CRITICO] El classpath está vacío/no generado")
@@ -1019,6 +1026,82 @@ class MinecraftLauncher:
             return True
         return libraries_found >= (libraries_required * 0.8)
     
+    def is_profile_version_downloaded(self, version: str, game_dir: str, strict: bool = True) -> bool:
+        """Verifica si una versión de un perfil custom está completamente descargada
+        
+        Args:
+            version: ID de la versión
+            game_dir: Directorio del perfil custom
+            strict: Si es True, requiere que las librerías estén descargadas.
+        """
+        version_dir = os.path.join(game_dir, "versions", version)
+        json_path = os.path.join(version_dir, f"{version}.json")
+        jar_path = os.path.join(version_dir, f"{version}.jar")
+        
+        if not os.path.exists(json_path) or not os.path.exists(jar_path):
+            return False
+        
+        # Si no es estricto, solo verificar que existan JSON y JAR
+        if not strict:
+            return True
+        
+        # Cargar JSON y verificar librerías críticas (incluyendo heredadas)
+        try:
+            version_json = self._load_version_json(version, game_dir=game_dir)
+            if not version_json:
+                return False
+        except:
+            return False
+        
+        libraries_dir = os.path.join(game_dir, "libraries")
+        libraries_required = 0
+        libraries_found = 0
+        
+        # Recopilar todas las librerías (incluyendo las heredadas)
+        all_libraries = []
+        visited_versions = set()
+        
+        def collect_libraries(v_json, visited):
+            """Recopila librerías de forma recursiva incluyendo versiones heredadas"""
+            if "inheritsFrom" in v_json:
+                parent_version = v_json["inheritsFrom"]
+                if parent_version not in visited:
+                    visited.add(parent_version)
+                    parent_json = self._load_version_json(parent_version, game_dir=game_dir)
+                    if parent_json:
+                        collect_libraries(parent_json, visited)
+            
+            # Agregar librerías de esta versión
+            for lib in v_json.get('libraries', []):
+                all_libraries.append(lib)
+        
+        collect_libraries(version_json, visited_versions)
+        
+        for lib in all_libraries:
+            # Verificar reglas
+            if "rules" in lib:
+                if not self._should_include_argument(lib):
+                    continue
+            
+            libraries_required += 1
+            lib_path = None
+            if "downloads" in lib and "artifact" in lib["downloads"]:
+                lib_path = lib["downloads"]["artifact"].get("path")
+            if not lib_path:
+                lib_name = lib.get("name", "")
+                if lib_name:
+                    lib_path = self._maven_name_to_path(lib_name)
+            
+            if lib_path:
+                full_path = os.path.join(libraries_dir, lib_path)
+                if os.path.exists(full_path):
+                    libraries_found += 1
+        
+        # Considerar descargada si tiene al menos el 80% de las librerías o si no hay librerías
+        if libraries_required == 0:
+            return True
+        return libraries_found >= (libraries_required * 0.8)
+    
     def get_available_versions(self, only_downloaded: bool = True, strict_check: bool = True) -> list:
         """Obtiene todas las versiones de Minecraft disponibles
         
@@ -1055,11 +1138,12 @@ class MinecraftLauncher:
             return None
         return versions[0]
     
-    def _load_version_json(self, version: str) -> Optional[Dict]:
+    def _load_version_json(self, version: str, game_dir: Optional[str] = None) -> Optional[Dict]:
         """Carga el archivo JSON de la versión, incluyendo herencia (inheritsFrom)"""
-        return self._load_version_json_recursive(version, set())
+        minecraft_path = game_dir if game_dir else self.minecraft_path
+        return self._load_version_json_recursive(version, set(), minecraft_path=minecraft_path)
     
-    def _load_version_json_recursive(self, version: str, visited: set) -> Optional[Dict]:
+    def _load_version_json_recursive(self, version: str, visited: set, minecraft_path: Optional[str] = None) -> Optional[Dict]:
         """Carga el JSON de la versión de forma recursiva, manejando herencia"""
         # Prevenir ciclos infinitos
         if version in visited:
@@ -1068,7 +1152,9 @@ class MinecraftLauncher:
         
         visited.add(version)
         
-        json_path = os.path.join(self.minecraft_path, "versions", version, f"{version}.json")
+        # Usar minecraft_path si se proporciona, sino usar self.minecraft_path
+        actual_minecraft_path = minecraft_path if minecraft_path else self.minecraft_path
+        json_path = os.path.join(actual_minecraft_path, "versions", version, f"{version}.json")
         if not os.path.exists(json_path):
             print(f"[ERROR] No se encontró el JSON de la versión: {version}")
             return None
@@ -1087,7 +1173,7 @@ class MinecraftLauncher:
             # No mostrar durante la carga inicial de versiones (solo lectura de JSON)
             print(f"[DEBUG] Versión {version} hereda de {parent_version}")
             
-            parent_json = self._load_version_json_recursive(parent_version, visited.copy())
+            parent_json = self._load_version_json_recursive(parent_version, visited.copy(), minecraft_path=actual_minecraft_path)
             if not parent_json:
                 print(f"[WARN] No se pudo cargar la versión padre {parent_version}, continuando sin herencia")
             else:
@@ -1226,7 +1312,7 @@ class MinecraftLauncher:
         path = f"{group_id}/{artifact_id}/{version}/{artifact_id}-{version}.jar"
         return path
     
-    def _build_classpath(self, version_json: Dict, version: str) -> Optional[str]:
+    def _build_classpath(self, version_json: Dict, version: str, game_dir: Optional[str] = None) -> Optional[str]:
         """
         Construye el classpath completo para Minecraft.
         
@@ -1234,8 +1320,10 @@ class MinecraftLauncher:
         + el JAR de la versión principal, en el orden exacto que aparecen en el JSON.
         Este es el classpath completo que se pasa con -cp, incluso cuando también se usa -p.
         """
-        libraries_dir = os.path.join(self.minecraft_path, "libraries")
-        version_jar = os.path.join(self.minecraft_path, "versions", version, f"{version}.jar")
+        # Usar game_dir si se proporciona, sino usar self.minecraft_path
+        actual_game_dir = game_dir if game_dir else self.minecraft_path
+        libraries_dir = os.path.join(actual_game_dir, "libraries")
+        version_jar = os.path.join(actual_game_dir, "versions", version, f"{version}.jar")
         
         classpath_parts = []
         # CRÍTICO: Usar un set para detectar duplicados por ruta absoluta normalizada
@@ -1473,7 +1561,7 @@ class MinecraftLauncher:
             traceback.print_exc()
             return False
     
-    def _extract_natives_to_temp_directory(self, version_json: Dict, version: str) -> Optional[str]:
+    def _extract_natives_to_temp_directory(self, version_json: Dict, version: str, game_dir: Optional[str] = None) -> Optional[str]:
         """
         Extrae los nativos desde los JARs de librerías a un directorio temporal único con hash.
         Esto replica el comportamiento del launcher oficial que crea bin/<HASH> para cada sesión.
@@ -1481,13 +1569,17 @@ class MinecraftLauncher:
         Args:
             version_json: JSON de la versión (mezclado con herencia)
             version: Nombre de la versión (ej: neoforge-21.1.215)
+            game_dir: Directorio del juego (para perfiles custom)
         
         Returns:
             Ruta al directorio temporal de nativos o None si falla
         """
         try:
+            # Usar game_dir si se proporciona, sino usar self.minecraft_path
+            actual_game_dir = game_dir if game_dir else self.minecraft_path
+            
             # Directorio base para nativos temporales
-            bin_base = os.path.join(self.minecraft_path, "bin")
+            bin_base = os.path.join(actual_game_dir, "bin")
             
             # Limpiar la carpeta bin antes de crear el nuevo directorio
             if os.path.exists(bin_base):
@@ -1532,7 +1624,7 @@ class MinecraftLauncher:
                 return None
             
             # Buscar librerías con nativos en el JSON
-            libraries_dir = os.path.join(self.minecraft_path, "libraries")
+            libraries_dir = os.path.join(actual_game_dir, "libraries")
             natives_extracted = 0
             
             if "libraries" in version_json:
@@ -1711,7 +1803,7 @@ class MinecraftLauncher:
         except Exception as e:
             print(f"[WARN] Error limpiando directorios antiguos: {e}")
     
-    def _get_jvm_arguments(self, version_json: Dict, version: Optional[str] = None, natives_hash_dir: Optional[str] = None) -> list:
+    def _get_jvm_arguments(self, version_json: Dict, version: Optional[str] = None, natives_hash_dir: Optional[str] = None, game_dir: Optional[str] = None) -> list:
         """
         Obtiene los argumentos JVM del archivo de versión.
         
@@ -1735,6 +1827,9 @@ class MinecraftLauncher:
         ]
         jvm_args.extend(official_jvm_args)
         
+        # Usar game_dir si se proporciona, sino usar self.minecraft_path
+        actual_game_dir = game_dir if game_dir else self.minecraft_path
+        
         # CRÍTICO: Luego agregar los argumentos JVM del JSON en el orden exacto
         # El orden importa: algunos mods/deps en NeoForge lo requieren
         if "arguments" in version_json and "jvm" in version_json["arguments"]:
@@ -1752,7 +1847,7 @@ class MinecraftLauncher:
                 base_version = None
                 if version:
                     # Leer el JSON original para obtener inheritsFrom
-                    json_path = os.path.join(self.minecraft_path, "versions", version, f"{version}.json")
+                    json_path = os.path.join(actual_game_dir, "versions", version, f"{version}.json")
                     if os.path.exists(json_path):
                         try:
                             with open(json_path, 'r', encoding='utf-8') as f:
@@ -1805,7 +1900,7 @@ class MinecraftLauncher:
             else:
                 print(f"[WARN] Directorio de nativos NO existe: {natives_dir}")
             
-            libraries_dir = os.path.join(self.minecraft_path, "libraries")
+            libraries_dir = os.path.join(actual_game_dir, "libraries")
             classpath_separator = ";" if self.system == "Windows" else ":"
             
             def replace_variables(text: str) -> str:
@@ -2028,9 +2123,12 @@ class MinecraftLauncher:
         
         return True
     
-    def _get_game_arguments(self, version_json: Dict, credentials: Dict, version: str) -> list:
+    def _get_game_arguments(self, version_json: Dict, credentials: Dict, version: str, game_dir: Optional[str] = None) -> list:
         """Obtiene los argumentos del juego"""
         game_args = []
+        
+        # Usar game_dir si se proporciona, sino usar self.minecraft_path
+        actual_game_dir = game_dir if game_dir else self.minecraft_path
         
         # Versiones modernas: usar arguments.game
         if "arguments" in version_json and "game" in version_json["arguments"]:
@@ -2039,15 +2137,15 @@ class MinecraftLauncher:
                     # Reemplazar variables
                     arg = arg.replace("${version_name}", version)
                     arg = arg.replace("${version_type}", version_json.get("type", "release"))
-                    arg = arg.replace("${assets_root}", os.path.join(self.minecraft_path, "assets"))
+                    arg = arg.replace("${assets_root}", os.path.join(actual_game_dir, "assets"))
                     arg = arg.replace("${assets_index_name}", version_json.get("assetIndex", {}).get("id", version))
                     arg = arg.replace("${auth_uuid}", credentials.get("uuid", ""))
                     arg = arg.replace("${auth_access_token}", credentials.get("access_token", ""))
                     arg = arg.replace("${auth_player_name}", credentials.get("username", "Player"))
                     arg = arg.replace("${user_type}", "mojang")
                     arg = arg.replace("${version_type}", version_json.get("type", "release"))
-                    arg = arg.replace("${game_directory}", self.minecraft_path)
-                    arg = arg.replace("${game_assets}", os.path.join(self.minecraft_path, "assets", "virtual", "legacy"))
+                    arg = arg.replace("${game_directory}", actual_game_dir)
+                    arg = arg.replace("${game_assets}", os.path.join(actual_game_dir, "assets", "virtual", "legacy"))
                     arg = arg.replace("${user_properties}", "{}")
                     
                     # Reemplazar variables de quick play con valores vacíos (no usamos quick play)
@@ -2071,14 +2169,14 @@ class MinecraftLauncher:
                                 if isinstance(value, str):
                                     value = value.replace("${version_name}", version)
                                     value = value.replace("${version_type}", version_json.get("type", "release"))
-                                    value = value.replace("${assets_root}", os.path.join(self.minecraft_path, "assets"))
+                                    value = value.replace("${assets_root}", os.path.join(actual_game_dir, "assets"))
                                     value = value.replace("${assets_index_name}", version_json.get("assetIndex", {}).get("id", version))
                                     value = value.replace("${auth_uuid}", credentials.get("uuid", ""))
                                     value = value.replace("${auth_access_token}", credentials.get("access_token", ""))
                                     value = value.replace("${auth_player_name}", credentials.get("username", "Player"))
                                     value = value.replace("${user_type}", "mojang")
-                                    value = value.replace("${game_directory}", self.minecraft_path)
-                                    value = value.replace("${game_assets}", os.path.join(self.minecraft_path, "assets", "virtual", "legacy"))
+                                    value = value.replace("${game_directory}", actual_game_dir)
+                                    value = value.replace("${game_assets}", os.path.join(actual_game_dir, "assets", "virtual", "legacy"))
                                     value = value.replace("${user_properties}", "{}")
                                     
                                     # Reemplazar variables de quick play con valores vacíos
@@ -2104,14 +2202,14 @@ class MinecraftLauncher:
                 # Reemplazar variables
                 arg = arg.replace("${version_name}", version)
                 arg = arg.replace("${version_type}", version_json.get("type", "release"))
-                arg = arg.replace("${assets_root}", os.path.join(self.minecraft_path, "assets"))
+                arg = arg.replace("${assets_root}", os.path.join(actual_game_dir, "assets"))
                 arg = arg.replace("${assets_index_name}", version_json.get("assetIndex", {}).get("id", version))
                 arg = arg.replace("${auth_uuid}", credentials.get("uuid", ""))
                 arg = arg.replace("${auth_access_token}", credentials.get("access_token", ""))
                 arg = arg.replace("${auth_player_name}", credentials.get("username", "Player"))
                 arg = arg.replace("${user_type}", "mojang")
-                arg = arg.replace("${game_directory}", self.minecraft_path)
-                arg = arg.replace("${game_assets}", os.path.join(self.minecraft_path, "assets", "virtual", "legacy"))
+                arg = arg.replace("${game_directory}", actual_game_dir)
+                arg = arg.replace("${game_assets}", os.path.join(actual_game_dir, "assets", "virtual", "legacy"))
                 arg = arg.replace("${user_properties}", "{}")
                 
                 # Reemplazar variables de quick play con valores vacíos
@@ -2130,8 +2228,8 @@ class MinecraftLauncher:
             game_args = [
                 "--username", credentials.get("username", "Player"),
                 "--version", version,
-                "--gameDir", self.minecraft_path,
-                "--assetsDir", os.path.join(self.minecraft_path, "assets"),
+                "--gameDir", actual_game_dir,
+                "--assetsDir", os.path.join(actual_game_dir, "assets"),
                 "--assetIndex", version_json.get("assetIndex", {}).get("id", version),
                 "--uuid", credentials.get("uuid", ""),
                 "--accessToken", credentials.get("access_token", ""),
