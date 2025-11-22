@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QLabel, QLineEdit, 
                              QTextEdit, QMessageBox, QProgressBar, QDialog, QDialogButtonBox,
                              QComboBox, QMenu, QGraphicsOpacityEffect, QListWidget, QListWidgetItem,
-                             QCheckBox)
+                             QCheckBox, QGroupBox, QScrollArea, QInputDialog)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QUrl, QPoint, QPropertyAnimation, QEasingCurve
 from PyQt5.QtGui import QColor, QPainter, QPen, QBrush, QPixmap, QPalette, QRegion, QPainterPath
 from PyQt5.QtCore import QRect
@@ -25,6 +25,7 @@ import re
 from auth_manager import AuthManager
 from credential_storage import CredentialStorage
 from minecraft_launcher import MinecraftLauncher
+from server_manager import ServerManagerDialog, fetch_profiles_json
 
 class LoadVersionsThread(QThread):
     """Thread para cargar versiones de Minecraft sin bloquear la UI"""
@@ -1012,6 +1013,622 @@ class VersionDownloadDialog(QDialog):
                 self.parent().progress_label.setVisible(False)
         QMessageBox.critical(self, "Error", f"No se pudo descargar la versión:\n{error}")
 
+class CustomProfileDialog(QDialog):
+    """Diálogo para instalar perfiles personalizados desde URL"""
+    
+    def __init__(self, parent=None, minecraft_launcher=None):
+        super().__init__(parent)
+        self.minecraft_launcher = minecraft_launcher
+        self.profiles_data = None
+        self.hostname = None
+        
+        self.setWindowTitle("Instalar Perfil Personalizado")
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.resize(800, 700)
+        self._center_on_parent_screen(parent)
+        
+        # Widget central
+        central_widget = QWidget()
+        central_widget.setObjectName("centralWidget")
+        central_widget.setStyleSheet("""
+            QWidget#centralWidget {
+                background: rgba(26, 13, 46, 0.8);
+            }
+        """)
+        
+        layout = QVBoxLayout()
+        layout.setContentsMargins(20, 5, 20, 5)
+        layout.setSpacing(10)
+        
+        # Barra de título
+        title_bar = TitleBar(self)
+        title_bar.setFixedHeight(35)
+        title_bar.setObjectName("titleBar")
+        title_bar_layout = QHBoxLayout()
+        title_bar_layout.setContentsMargins(10, 0, 10, 0)
+        title_bar_layout.setSpacing(5)
+        title_bar.setLayout(title_bar_layout)
+        
+        title = QLabel("Instalar Perfil Personalizado")
+        title.setObjectName("titleLabel")
+        title.setAlignment(Qt.AlignCenter)
+        title_bar_layout.addWidget(title, 1)
+        
+        minimize_btn = QPushButton("−")
+        minimize_btn.setObjectName("minimizeButton")
+        minimize_btn.clicked.connect(self.showMinimized)
+        title_bar_layout.addWidget(minimize_btn)
+        
+        close_btn = QPushButton("×")
+        close_btn.setObjectName("closeButton")
+        close_btn.clicked.connect(self.reject)
+        title_bar_layout.addWidget(close_btn)
+        
+        layout.addWidget(title_bar)
+        
+        # Campo de Hostname/IP
+        hostname_layout = QHBoxLayout()
+        hostname_label = QLabel("Hostname o IP:")
+        hostname_label.setStyleSheet("color: #e9d5ff; font-size: 12px;")
+        hostname_layout.addWidget(hostname_label)
+        
+        self.hostname_input = QLineEdit()
+        self.hostname_input.setPlaceholderText("localhost o 192.168.1.1")
+        self.hostname_input.setStyleSheet("""
+            QLineEdit {
+                background: #1a0d2e;
+                color: #e9d5ff;
+                border: 2px solid #6d28d9;
+                border-radius: 5px;
+                padding: 5px;
+                font-size: 12px;
+            }
+            QLineEdit:focus {
+                border-color: #8b5cf6;
+            }
+        """)
+        hostname_layout.addWidget(self.hostname_input, 1)
+        
+        self.load_button = QPushButton("Cargar")
+        self.load_button.clicked.connect(self.load_profiles_json)
+        self.load_button.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #7c3aed, stop:1 #5b21b6);
+                color: white;
+                border: 2px solid #8b5cf6;
+                border-radius: 5px;
+                padding: 5px 15px;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #8b5cf6, stop:1 #6d28d9);
+            }
+            QPushButton:disabled {
+                background: #3f3f3f;
+                color: #888888;
+                border-color: #555555;
+            }
+        """)
+        hostname_layout.addWidget(self.load_button)
+        
+        layout.addLayout(hostname_layout)
+        
+        # Selector de perfiles
+        profile_layout = QHBoxLayout()
+        profile_label = QLabel("Perfil:")
+        profile_label.setStyleSheet("color: #e9d5ff; font-size: 12px;")
+        profile_layout.addWidget(profile_label)
+        
+        self.profile_combo = QComboBox()
+        self.profile_combo.setEnabled(False)
+        self.profile_combo.currentIndexChanged.connect(self.on_profile_selected)
+        profile_layout.addWidget(self.profile_combo, 1)
+        
+        layout.addLayout(profile_layout)
+        
+        # Área de información del perfil (scrollable)
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setStyleSheet("""
+            QScrollArea {
+                background: transparent;
+                border: none;
+            }
+            QScrollBar:vertical {
+                background: #1a0d2e;
+                width: 12px;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:vertical {
+                background: #6d28d9;
+                border-radius: 6px;
+                min-height: 20px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #8b5cf6;
+            }
+        """)
+        
+        info_widget = QWidget()
+        info_widget.setStyleSheet("""
+            QWidget {
+                background: rgba(26, 13, 46, 0.6);
+            }
+        """)
+        info_layout = QVBoxLayout()
+        info_layout.setSpacing(10)
+        
+        # Información básica del servidor
+        self.server_name_label = QLabel("")
+        self.server_name_label.setStyleSheet("color: #a78bfa; font-size: 14px; font-weight: bold;")
+        self.server_name_label.setVisible(False)
+        info_layout.addWidget(self.server_name_label)
+        
+        self.server_connection_label = QLabel("")
+        self.server_connection_label.setStyleSheet("color: #e9d5ff; font-size: 12px;")
+        self.server_connection_label.setVisible(False)
+        info_layout.addWidget(self.server_connection_label)
+        
+        self.server_description_label = QLabel("")
+        self.server_description_label.setStyleSheet("color: #c4b5fd; font-size: 11px;")
+        self.server_description_label.setWordWrap(True)
+        self.server_description_label.setVisible(False)
+        info_layout.addWidget(self.server_description_label)
+        
+        # Lista 1: Versiones necesarias
+        versions_group = QGroupBox("Versiones Necesarias")
+        versions_group.setStyleSheet("""
+            QGroupBox {
+                background: rgba(26, 13, 46, 0.8);
+                color: #a78bfa;
+                font-size: 12px;
+                font-weight: bold;
+                border: 2px solid #6d28d9;
+                border-radius: 5px;
+                margin-top: 10px;
+                padding-top: 10px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px;
+                background: rgba(26, 13, 46, 0.8);
+            }
+        """)
+        versions_layout = QVBoxLayout()
+        self.versions_list = QListWidget()
+        self.versions_list.setEnabled(False)
+        self.versions_list.setStyleSheet("""
+            QListWidget {
+                background: #1a0d2e;
+                color: #e9d5ff;
+                border: 1px solid #6d28d9;
+                border-radius: 3px;
+                font-size: 11px;
+            }
+        """)
+        versions_layout.addWidget(self.versions_list)
+        versions_group.setLayout(versions_layout)
+        info_layout.addWidget(versions_group)
+        
+        # Lista 2: Mods
+        mods_group = QGroupBox("Mods")
+        mods_group.setStyleSheet(versions_group.styleSheet())
+        mods_layout = QVBoxLayout()
+        self.mods_list = QListWidget()
+        self.mods_list.setEnabled(False)
+        self.mods_list.setStyleSheet(self.versions_list.styleSheet())
+        mods_layout.addWidget(self.mods_list)
+        mods_group.setLayout(mods_layout)
+        info_layout.addWidget(mods_group)
+        
+        # Lista 3: Shaders
+        shaders_group = QGroupBox("Shaders")
+        shaders_group.setStyleSheet(versions_group.styleSheet())
+        shaders_layout = QVBoxLayout()
+        self.shaders_list = QListWidget()
+        self.shaders_list.setEnabled(False)
+        self.shaders_list.setStyleSheet(self.versions_list.styleSheet())
+        shaders_layout.addWidget(self.shaders_list)
+        shaders_group.setLayout(shaders_layout)
+        info_layout.addWidget(shaders_group)
+        
+        # Lista 4: Resource Packs
+        resourcepacks_group = QGroupBox("Resource Packs")
+        resourcepacks_group.setStyleSheet(versions_group.styleSheet())
+        resourcepacks_layout = QVBoxLayout()
+        self.resourcepacks_list = QListWidget()
+        self.resourcepacks_list.setEnabled(False)
+        self.resourcepacks_list.setStyleSheet(self.versions_list.styleSheet())
+        resourcepacks_layout.addWidget(self.resourcepacks_list)
+        resourcepacks_group.setLayout(resourcepacks_layout)
+        info_layout.addWidget(resourcepacks_group)
+        
+        # Lista 5: Opciones
+        options_group = QGroupBox("Opciones")
+        options_group.setStyleSheet(versions_group.styleSheet())
+        options_layout = QVBoxLayout()
+        self.options_list = QListWidget()
+        self.options_list.setEnabled(False)
+        self.options_list.setStyleSheet(self.versions_list.styleSheet())
+        options_layout.addWidget(self.options_list)
+        options_group.setLayout(options_layout)
+        info_layout.addWidget(options_group)
+        
+        info_widget.setLayout(info_layout)
+        scroll_area.setWidget(info_widget)
+        layout.addWidget(scroll_area, 1)
+        
+        # Botones
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        
+        cancel_button = QPushButton("Cancelar")
+        cancel_button.clicked.connect(self.reject)
+        cancel_button.setStyleSheet("""
+            QPushButton {
+                background: #3f3f3f;
+                color: #e9d5ff;
+                border: 2px solid #555555;
+                border-radius: 5px;
+                padding: 8px 20px;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background: #4f4f4f;
+                border-color: #666666;
+            }
+        """)
+        button_layout.addWidget(cancel_button)
+        
+        self.install_button = QPushButton("Instalar")
+        self.install_button.setEnabled(False)
+        self.install_button.clicked.connect(self.start_installation)
+        self.install_button.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #7c3aed, stop:1 #5b21b6);
+                color: white;
+                border: 2px solid #8b5cf6;
+                border-radius: 5px;
+                padding: 8px 20px;
+                font-size: 12px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #8b5cf6, stop:1 #6d28d9);
+            }
+            QPushButton:disabled {
+                background: #3f3f3f;
+                color: #888888;
+                border-color: #555555;
+            }
+        """)
+        button_layout.addWidget(self.install_button)
+        
+        layout.addLayout(button_layout)
+        
+        central_widget.setLayout(layout)
+        
+        # Layout principal del diálogo
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.addWidget(central_widget)
+        self.setLayout(main_layout)
+        
+        # Aplicar estilos
+        self.setStyleSheet("""
+            QDialog {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #1a0d2e, stop:0.5 #2d1b4e, stop:1 #1a0d2e);
+                border: 2px solid #8b5cf6;
+                border-radius: 10px;
+            }
+            QLabel#titleLabel {
+                color: #a78bfa;
+                font-size: 14px;
+                font-weight: bold;
+            }
+            QPushButton#closeButton {
+                background: #dc2626;
+                border: 1px solid #ef4444;
+                border-radius: 3px;
+                min-width: 20px;
+                max-width: 20px;
+                min-height: 20px;
+                max-height: 20px;
+                font-size: 16px;
+                font-weight: bold;
+                padding: 0px;
+            }
+            QPushButton#closeButton:hover {
+                background: #ef4444;
+                border: 1px solid #f87171;
+            }
+            QPushButton#minimizeButton {
+                background: #6b7280;
+                border: 1px solid #9ca3af;
+                border-radius: 3px;
+                min-width: 20px;
+                max-width: 20px;
+                min-height: 20px;
+                max-height: 20px;
+                font-size: 16px;
+                font-weight: bold;
+                padding: 0px;
+            }
+            QPushButton#minimizeButton:hover {
+                background: #9ca3af;
+                border: 1px solid #d1d5db;
+            }
+            QComboBox {
+                background: #1a0d2e;
+                color: #e9d5ff;
+                border: 2px solid #6d28d9;
+                border-radius: 5px;
+                padding: 5px;
+                font-size: 12px;
+            }
+            QComboBox:hover {
+                border-color: #8b5cf6;
+            }
+            QComboBox::drop-down {
+                border: none;
+                background: #5b21b6;
+            }
+            QComboBox QAbstractItemView {
+                background: #1a0d2e;
+                color: #e9d5ff;
+                border: 2px solid #8b5cf6;
+                selection-background-color: #7c3aed;
+            }
+        """)
+    
+    def _center_on_parent_screen(self, parent):
+        """Centra la ventana en la pantalla donde está la ventana principal"""
+        if parent:
+            parent_geometry = parent.geometry()
+            parent_center = parent_geometry.center()
+            dialog_geometry = self.geometry()
+            dialog_geometry.moveCenter(parent_center)
+            self.setGeometry(dialog_geometry)
+        else:
+            # Centrar en la pantalla principal si no hay parent
+            screen = QApplication.primaryScreen().geometry()
+            dialog_geometry = self.geometry()
+            dialog_geometry.moveCenter(screen.center())
+            self.setGeometry(dialog_geometry)
+    
+    def load_profiles_json(self):
+        """Carga el archivo profiles.json desde el hostname usando la función compartida"""
+        hostname = self.hostname_input.text().strip()
+        if not hostname:
+            QMessageBox.warning(self, "Error", "Por favor, introduce un hostname o IP")
+            return
+        
+        self.load_button.setEnabled(False)
+        self.load_button.setText("Cargando...")
+        
+        # Usar la función compartida para obtener el JSON
+        json_data, error_message = fetch_profiles_json(hostname, api_key=None)
+        
+        if error_message:
+            QMessageBox.critical(self, "Error", error_message)
+            self.load_button.setEnabled(True)
+            self.load_button.setText("Cargar")
+            return
+        
+        if not json_data:
+            QMessageBox.warning(self, "Error", "No se recibieron datos del servidor")
+            self.load_button.setEnabled(True)
+            self.load_button.setText("Cargar")
+            return
+        
+        try:
+            self.profiles_data = json_data
+            self.hostname = hostname
+            
+            # Llenar selector de perfiles
+            self.profile_combo.clear()
+            if "profiles" in self.profiles_data and self.profiles_data["profiles"]:
+                for profile in self.profiles_data["profiles"]:
+                    profile_name = profile.get("name", profile.get("id", "Sin nombre"))
+                    self.profile_combo.addItem(profile_name, profile)
+                
+                self.profile_combo.setEnabled(True)
+                self.profile_combo.setCurrentIndex(0)  # Seleccionar el primero
+                self.on_profile_selected(0)
+            else:
+                QMessageBox.warning(self, "Error", "No se encontraron perfiles en el JSON")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Error inesperado:\n{str(e)}")
+        finally:
+            self.load_button.setEnabled(True)
+            self.load_button.setText("Cargar")
+    
+    def on_profile_selected(self, index):
+        """Se llama cuando se selecciona un perfil"""
+        if index < 0 or not self.profiles_data:
+            return
+        
+        profile = self.profile_combo.itemData(index)
+        if not profile:
+            return
+        
+        # Mostrar información del servidor
+        server_name = self.profiles_data.get("server_name", "Servidor desconocido")
+        self.server_name_label.setText(f"Servidor: {server_name}")
+        self.server_name_label.setVisible(True)
+        
+        # Info de conexión
+        config = profile.get("config", {})
+        server_ip = config.get("server_ip", "No especificado")
+        server_port = config.get("server_port", 25565)
+        self.server_connection_label.setText(f"Conexión: {server_ip}:{server_port}")
+        self.server_connection_label.setVisible(True)
+        
+        # Descripción
+        description = profile.get("description", "")
+        if description:
+            self.server_description_label.setText(f"Descripción: {description}")
+            self.server_description_label.setVisible(True)
+        else:
+            self.server_description_label.setVisible(False)
+        
+        # Lista 1: Versiones necesarias
+        self.versions_list.clear()
+        version_base = profile.get("version_base", {})
+        if version_base:
+            version_type = version_base.get("type", "unknown")
+            if version_type == "neoforge":
+                minecraft_version = version_base.get("minecraft_version", "N/A")
+                neoforge_version = version_base.get("neoforge_version", "N/A")
+                self.versions_list.addItem(f"Vanilla: {minecraft_version}")
+                self.versions_list.addItem(f"NeoForge: {neoforge_version}")
+            elif version_type == "vanilla":
+                minecraft_version = version_base.get("minecraft_version", "N/A")
+                self.versions_list.addItem(f"Vanilla: {minecraft_version}")
+        
+        # Lista 2: Mods
+        self.mods_list.clear()
+        mods = profile.get("mods", [])
+        for mod in mods:
+            mod_name = mod.get("name", "Sin nombre")
+            required = mod.get("required", False)
+            required_text = " (Requerido)" if required else ""
+            self.mods_list.addItem(f"{mod_name}{required_text}")
+        
+        # Lista 3: Shaders
+        self.shaders_list.clear()
+        shaders = profile.get("shaders", [])
+        for shader in shaders:
+            shader_name = shader.get("name", "Sin nombre")
+            enabled = shader.get("enabled", False)
+            enabled_text = " (Activado)" if enabled else ""
+            self.shaders_list.addItem(f"{shader_name}{enabled_text}")
+        
+        # Lista 4: Resource Packs
+        self.resourcepacks_list.clear()
+        resourcepacks = profile.get("resourcepacks", [])
+        for rp in resourcepacks:
+            rp_name = rp.get("name", "Sin nombre")
+            enabled = rp.get("enabled", False)
+            enabled_text = " (Activado)" if enabled else ""
+            self.resourcepacks_list.addItem(f"{rp_name}{enabled_text}")
+        
+        # Lista 5: Opciones
+        self.options_list.clear()
+        options = profile.get("options", {})
+        if options:
+            if options.get("enable_shaders", False):
+                shader_pack = options.get("shader_pack", "No especificado")
+                self.options_list.addItem(f"Shaders: Activados ({shader_pack})")
+            else:
+                self.options_list.addItem("Shaders: Desactivados")
+            
+            if options.get("enable_resourcepacks", False):
+                resource_packs = options.get("resource_packs", [])
+                if resource_packs:
+                    self.options_list.addItem(f"Resource Packs: Activados ({', '.join(resource_packs)})")
+                else:
+                    self.options_list.addItem("Resource Packs: Activados (todos)")
+            else:
+                self.options_list.addItem("Resource Packs: Desactivados")
+            
+            if "fov" in options:
+                self.options_list.addItem(f"FOV: {options['fov']}")
+            if "renderDistance" in options:
+                self.options_list.addItem(f"Distancia de renderizado: {options['renderDistance']}")
+            if "maxFps" in options:
+                self.options_list.addItem(f"FPS máximo: {options['maxFps']}")
+        
+        # Habilitar botón de instalar
+        self.install_button.setEnabled(True)
+    
+    def start_installation(self):
+        """Inicia la instalación del perfil seleccionado"""
+        index = self.profile_combo.currentIndex()
+        if index < 0:
+            return
+        
+        profile = self.profile_combo.itemData(index)
+        if not profile:
+            return
+        
+        # Por ahora solo mostrar mensaje - se implementará después
+        QMessageBox.information(
+            self,
+            "Instalación",
+            f"La instalación del perfil '{profile.get('name', 'Sin nombre')}' se implementará próximamente."
+        )
+
+# ServerManagerDialog movido a server_manager.py
+
+class TitleBar(QWidget):
+    """Barra de título personalizada que permite arrastrar la ventana"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent_window = parent
+        self.old_pos = None
+    
+    def mousePressEvent(self, event):
+        """Inicia el arrastre de la ventana"""
+        if event.button() == Qt.LeftButton:
+            self.old_pos = event.globalPos()
+    
+    def mouseMoveEvent(self, event):
+        """Mueve la ventana cuando se arrastra"""
+        if self.old_pos and self.parent_window:
+            delta = event.globalPos() - self.old_pos
+            self.parent_window.move(self.parent_window.pos() + delta)
+            self.old_pos = event.globalPos()
+
+class TitleBar(QWidget):
+    """Barra de título personalizada que permite arrastrar la ventana"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent_window = parent
+        self.old_pos = None
+    
+    def mousePressEvent(self, event):
+        """Inicia el arrastre de la ventana"""
+        if event.button() == Qt.LeftButton:
+            self.old_pos = event.globalPos()
+    
+    def mouseMoveEvent(self, event):
+        """Mueve la ventana cuando se arrastra"""
+        if self.old_pos and self.parent_window:
+            delta = event.globalPos() - self.old_pos
+            self.parent_window.move(self.parent_window.pos() + delta)
+            self.old_pos = event.globalPos()
+
+class TitleBar(QWidget):
+    """Barra de título personalizada que permite arrastrar la ventana"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent_window = parent
+        self.old_pos = None
+    
+    def mousePressEvent(self, event):
+        """Inicia el arrastre de la ventana"""
+        if event.button() == Qt.LeftButton:
+            self.old_pos = event.globalPos()
+    
+    def mouseMoveEvent(self, event):
+        """Mueve la ventana cuando se arrastra"""
+        if self.old_pos and self.parent_window:
+            delta = event.globalPos() - self.old_pos
+            self.parent_window.move(self.parent_window.pos() + delta)
+            self.old_pos = event.globalPos()
+
 class TitleBar(QWidget):
     """Barra de título personalizada que permite arrastrar la ventana"""
     
@@ -1054,6 +1671,9 @@ class LauncherWindow(QMainWindow):
         
         # Inicializar archivo de configuración si no existe
         self.load_last_selected_version()
+        
+        # Cargar modo desarrollador
+        self.developer_mode = self.load_developer_mode()
         
         self.init_ui()
         
@@ -1416,9 +2036,27 @@ class LauncherWindow(QMainWindow):
         
         add_version_button = QPushButton("+")
         add_version_button.setToolTip("Añadir nueva versión")
-        add_version_button.clicked.connect(self.show_add_version_dialog)
         add_version_button.setFixedSize(40, 40)  # Misma altura que combo y label
         add_version_button.setStyleSheet("font-size: 24px; padding: 5px; font-weight: bold;")
+        
+        # Crear menú desplegable con opciones
+        add_version_menu = QMenu(self)
+        
+        # Opción 1: Vanilla
+        vanilla_action = add_version_menu.addAction("Vanilla")
+        vanilla_action.triggered.connect(self.show_add_version_dialog)
+        
+        # Opción 2: NeoForge
+        neoforge_action = add_version_menu.addAction("NeoForge")
+        neoforge_action.triggered.connect(self.show_neoforge_dialog)
+        
+        # Opción 3: Custom (Perfiles remotos)
+        custom_action = add_version_menu.addAction("Custom")
+        custom_action.triggered.connect(self.show_custom_profile_dialog)
+        
+        # Conectar el botón al menú
+        add_version_button.setMenu(add_version_menu)
+        
         version_layout.addWidget(add_version_button)
         
         layout.addLayout(version_layout)
@@ -1726,7 +2364,7 @@ class LauncherWindow(QMainWindow):
         self.add_message(f"Error cargando versiones: {error_msg}")
     
     def show_add_version_dialog(self):
-        """Muestra el diálogo para añadir una nueva versión"""
+        """Muestra el diálogo para añadir una nueva versión Vanilla"""
         dialog = VersionDownloadDialog(self, self.minecraft_launcher)
         # Guardar referencia al diálogo
         self.version_download_dialog = dialog
@@ -1736,6 +2374,20 @@ class LauncherWindow(QMainWindow):
         # Limpiar referencia al diálogo
         if self.version_download_dialog == dialog:
             self.version_download_dialog = None
+    
+    def show_neoforge_dialog(self):
+        """Muestra el diálogo para añadir una nueva versión NeoForge (placeholder)"""
+        # Por ahora no hace nada
+        QMessageBox.information(
+            self,
+            "NeoForge",
+            "La instalación de NeoForge estará disponible próximamente."
+        )
+    
+    def show_custom_profile_dialog(self):
+        """Muestra el diálogo para añadir perfiles personalizados desde URL"""
+        dialog = CustomProfileDialog(self, self.minecraft_launcher)
+        result = dialog.exec_()
     
     def load_versions(self):
         """Carga las versiones de Minecraft disponibles (solo las descargadas) - versión síncrona para el botón refresh"""
@@ -2716,8 +3368,25 @@ class LauncherWindow(QMainWindow):
         """Maneja el clic en el widget de usuario"""
         credentials = self.credential_storage.load_credentials()
         if credentials:
-            # Mostrar menú desplegable con opción de cerrar sesión
+            # Mostrar menú desplegable con opciones
             menu = QMenu(self)
+            
+            # Opción: Modo desarrollador (checkbox)
+            developer_action = menu.addAction("Modo desarrollador")
+            developer_action.setCheckable(True)
+            developer_action.setChecked(self.developer_mode)
+            developer_action.triggered.connect(self.toggle_developer_mode)
+            
+            # Opción: Administrador de servidores (solo si modo desarrollador está activo)
+            if self.developer_mode:
+                menu.addSeparator()
+                server_manager_action = menu.addAction("Administrador de servidores")
+                server_manager_action.triggered.connect(self.show_server_manager)
+            
+            # Separador
+            menu.addSeparator()
+            
+            # Opción: Cerrar sesión
             logout_action = menu.addAction("Cerrar sesión")
             logout_action.triggered.connect(self.logout)
             
@@ -2726,6 +3395,11 @@ class LauncherWindow(QMainWindow):
         else:
             # Si no hay sesión, iniciar autenticación
             self.start_authentication()
+    
+    def show_server_manager(self):
+        """Muestra el diálogo de administrador de servidores"""
+        dialog = ServerManagerDialog(self, self.minecraft_launcher)
+        dialog.exec_()
     
     def update_user_widget(self, credentials: Optional[dict]):
         """Actualiza el widget de usuario con la información del jugador"""
@@ -2794,6 +3468,51 @@ class LauncherWindow(QMainWindow):
             print(f"Error cargando avatar: {e}")
             self.user_avatar_label.setVisible(False)
     
+    def load_developer_mode(self) -> bool:
+        """Carga el estado del modo desarrollador desde la configuración"""
+        try:
+            import json
+            from config import CONFIG_FILE
+            
+            if CONFIG_FILE.exists():
+                with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    return config.get('developer_mode', False)
+            return False
+        except Exception as e:
+            print(f"Error cargando modo desarrollador: {e}")
+            return False
+    
+    def save_developer_mode(self, enabled: bool):
+        """Guarda el estado del modo desarrollador en la configuración"""
+        try:
+            import json
+            from config import CONFIG_FILE
+            
+            config = {}
+            if CONFIG_FILE.exists():
+                try:
+                    with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                        config = json.load(f)
+                except (json.JSONDecodeError, IOError):
+                    config = {}
+            
+            config['developer_mode'] = enabled
+            
+            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=2)
+        except Exception as e:
+            print(f"Error guardando modo desarrollador: {e}")
+    
+    def toggle_developer_mode(self, checked: bool):
+        """Alterna el modo desarrollador"""
+        self.developer_mode = checked
+        self.save_developer_mode(checked)
+        if checked:
+            self.add_message("Modo desarrollador activado")
+        else:
+            self.add_message("Modo desarrollador desactivado")
+    
     def logout(self):
         """Cierra la sesión y elimina las credenciales"""
         reply = QMessageBox.question(
@@ -2818,6 +3537,12 @@ class LauncherWindow(QMainWindow):
         center_point = screen.center()
         frame_geometry.moveCenter(center_point)
         self.move(frame_geometry.topLeft())
+        
+        # Asegurar que la ventana no esté minimizada
+        self.setWindowState(Qt.WindowNoState)
+        self.show()
+        self.raise_()
+        self.activateWindow()
 
 def main():
     app = QApplication(sys.argv)
