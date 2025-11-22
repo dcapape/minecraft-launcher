@@ -12,6 +12,7 @@ import zipfile
 import shutil
 import uuid
 from java_downloader import JavaDownloader
+from asset_downloader import AssetDownloader
 
 class MinecraftLauncher:
     """Gestiona el lanzamiento de Minecraft Java Edition"""
@@ -337,10 +338,26 @@ class MinecraftLauncher:
             if not natives_hash_dir:
                 print("[WARN] No se pudo crear el directorio temporal de nativos, usando directorio estándar")
             
+            # Verificar y descargar assets si es necesario
+            # Los assets siempre van al directorio global, no al perfil
+            assets_dir = os.path.join(self.minecraft_path, "assets")
+            asset_downloader = AssetDownloader(assets_dir)
+            
+            # Verificar si los assets están completos
+            valid_assets, total_assets = asset_downloader.verify_assets(version_json)
+            
+            if valid_assets < total_assets:
+                print(f"[INFO] Assets incompletos ({valid_assets}/{total_assets}), descargando...")
+                downloaded, total = asset_downloader.download_assets(version_json)
+                if downloaded > 0:
+                    print(f"[INFO] {downloaded} assets descargados")
+                elif valid_assets == 0:
+                    print(f"[WARN] No se pudieron descargar los assets, el juego puede no funcionar correctamente")
+            
             # Obtener argumentos JVM y del juego
-            # Pasar también selected_version y el directorio temporal de nativos
-            jvm_args = self._get_jvm_arguments(version_json, selected_version, natives_hash_dir)
-            game_args = self._get_game_arguments(version_json, credentials, selected_version)
+            # Pasar también selected_version, el directorio temporal de nativos y el game_dir del perfil
+            jvm_args = self._get_jvm_arguments(version_json, selected_version, natives_hash_dir, game_dir=actual_game_dir)
+            game_args = self._get_game_arguments(version_json, credentials, selected_version, game_dir=actual_game_dir)
             
             # Verificar si se usa módulo path (-p) en los argumentos JVM
             uses_module_path = any("-p" in str(arg) for arg in jvm_args)
@@ -351,38 +368,11 @@ class MinecraftLauncher:
                 libraries_dir = os.path.join(actual_game_dir, "libraries")
                 classpath_separator = ";" if self.system == "Windows" else ":"
                 
-                # DEPURACIÓN: Listar contenido del directorio de librerías
-                print(f"[DEBUG] Contenido del directorio de librerías ({libraries_dir}):")
-                try:
-                    if os.path.exists(libraries_dir):
-                        # Listar solo el primer nivel para no saturar
-                        items = os.listdir(libraries_dir)
-                        print(f"[DEBUG] Total de items en libraries: {len(items)}")
-                        # Mostrar todos los items
-                        for idx, item in enumerate(items, 1):
-                            item_path = os.path.join(libraries_dir, item)
-                            item_type = "DIR" if os.path.isdir(item_path) else "FILE"
-                            print(f"[DEBUG]   [{idx}] [{item_type}] {item}")
-                        
-                        # Buscar específicamente directorios sospechosos
-                        suspicious_dirs = []
-                        for item in items:
-                            item_lower = item.lower()
-                            if "bin." in item_lower or "ce6c" in item_lower or "meta-inf" in item_lower:
-                                item_path = os.path.join(libraries_dir, item)
-                                if os.path.isdir(item_path):
-                                    suspicious_dirs.append(item)
-                        
-                        if suspicious_dirs:
-                            print(f"[DEBUG] [ADVERTENCIA] Directorios sospechosos encontrados en libraries:")
-                            for sus_dir in suspicious_dirs:
-                                print(f"[DEBUG]   - {sus_dir}")
-                        else:
-                            print(f"[DEBUG] No se encontraron directorios sospechosos en libraries")
-                    else:
-                        print(f"[DEBUG] El directorio de librerías no existe: {libraries_dir}")
-                except Exception as e:
-                    print(f"[DEBUG] Error al listar directorio de librerías: {e}")
+                # Verificar que el directorio de librerías existe
+                if not os.path.exists(libraries_dir):
+                    print(f"[ERROR] El directorio de librerías no existe: {libraries_dir}")
+                else:
+                    print(f"[DEBUG] Directorio de librerías: {libraries_dir}")
                 
                 # Buscar el argumento -p y construir el module path desde el JSON original
                 for i, arg in enumerate(jvm_args):
@@ -394,11 +384,14 @@ class MinecraftLauncher:
                             jar_paths_raw = [j.strip() for j in module_path_value.split(classpath_separator) if j.strip()]
                             
                             print(f"[DEBUG] Module path RAW tiene {len(jar_paths_raw)} entradas (desde JSON)")
+                            print(f"[DEBUG] Directorio de librerías del perfil: {libraries_dir}")
                             
                             # Construir lista de JARs válidos en el orden exacto del JSON
                             # CRÍTICO: Prevenir duplicados (el launcher oficial no incluye JARs duplicados)
                             valid_jars = []
                             seen_jars = set()  # Para detectar duplicados
+                            missing_jars = []  # Para reportar JARs faltantes
+                            rejected_jars = []  # Para reportar JARs rechazados
             
                             for jar_path_raw in jar_paths_raw:
                                 # Ignorar argumentos JVM que puedan haberse colado
@@ -418,10 +411,17 @@ class MinecraftLauncher:
                                 
                                 # Convertir a ruta absoluta si es relativa
                                 if not os.path.isabs(jar_path_raw):
-                                    # Construir desde libraries_dir
+                                    # Construir desde libraries_dir del perfil
                                     jar_path = os.path.join(libraries_dir, jar_path_raw.replace("/", os.path.sep))
                                 else:
                                     jar_path = jar_path_raw
+                                    # Si es absoluta pero apunta fuera del perfil, intentar construirla desde el perfil
+                                    jar_path_normalized = jar_path_raw.replace("\\", "/")
+                                    # Extraer la parte relativa después de "libraries/"
+                                    if "/libraries/" in jar_path_normalized:
+                                        relative_part = jar_path_normalized.split("/libraries/", 1)[1]
+                                        jar_path = os.path.join(libraries_dir, relative_part.replace("/", os.path.sep))
+                                        print(f"[DEBUG] Reconstruyendo ruta absoluta desde perfil: {jar_path}")
                                 
                                 # Normalizar separadores
                                 if self.system == "Windows":
@@ -432,7 +432,8 @@ class MinecraftLauncher:
                                 # 2. Es un archivo (NO un directorio)
                                 # 3. Existe
                                 if not os.path.exists(jar_path):
-                                    print(f"[SKIP] JAR no existe: {jar_path}")
+                                    missing_jars.append(jar_path_raw)
+                                    print(f"[SKIP] JAR no existe: {jar_path} (ruta original: {jar_path_raw})")
                                     continue
                                 
                                 if not os.path.isfile(jar_path):
@@ -455,7 +456,15 @@ class MinecraftLauncher:
                                     jar_path_real = os.path.realpath(jar_path)
                                     libraries_dir_real = os.path.realpath(libraries_dir)
                                     if not jar_path_real.startswith(libraries_dir_real):
+                                        rejected_jars.append({
+                                            "path": jar_path,
+                                            "original": jar_path_raw,
+                                            "reason": "fuera del directorio del perfil",
+                                            "expected_dir": libraries_dir_real
+                                        })
                                         print(f"[SKIP] JAR fuera del directorio de librerías del perfil: {jar_path}")
+                                        print(f"[DEBUG]   Ruta real: {jar_path_real}")
+                                        print(f"[DEBUG]   Directorio esperado: {libraries_dir_real}")
                                         continue
                                 
                                     # CRÍTICO: Usar ruta real para detectar duplicados (case-insensitive en Windows)
@@ -492,6 +501,56 @@ class MinecraftLauncher:
                             
                             if not valid_jars:
                                 print(f"[ERROR] No hay JARs válidos en el module path")
+                                print(f"[ERROR] Total de entradas procesadas: {len(jar_paths_raw)}")
+                                print(f"[ERROR] JARs válidos encontrados: {len(valid_jars)}")
+                                
+                                if missing_jars:
+                                    print(f"[ERROR] JARs faltantes ({len(missing_jars)}):")
+                                    for missing in missing_jars[:20]:  # Limitar a 20 para no saturar
+                                        print(f"[ERROR]   - {missing}")
+                                    if len(missing_jars) > 20:
+                                        print(f"[ERROR]   ... y {len(missing_jars) - 20} más")
+                                
+                                if rejected_jars:
+                                    print(f"[ERROR] JARs rechazados ({len(rejected_jars)}):")
+                                    for rejected in rejected_jars[:20]:  # Limitar a 20
+                                        print(f"[ERROR]   - {rejected['original']}")
+                                        print(f"[ERROR]     Razón: {rejected['reason']}")
+                                        print(f"[ERROR]     Ruta: {rejected['path']}")
+                                    if len(rejected_jars) > 20:
+                                        print(f"[ERROR]   ... y {len(rejected_jars) - 20} más")
+                                
+                                # Mostrar librerías críticas esperadas
+                                critical_libs = [
+                                    ("cpw.mods", "bootstraplauncher"),
+                                    ("cpw.mods", "securejarhandler"),
+                                    ("org.ow2.asm", "asm"),
+                                    ("net.neoforged", "JarJarFileSystems")
+                                ]
+                                print(f"[ERROR] Verificando librerías críticas del module path:")
+                                for group_id, artifact_id in critical_libs:
+                                    # Construir ruta base del grupo
+                                    group_path = group_id.replace(".", os.path.sep)
+                                    lib_base_dir = os.path.join(libraries_dir, group_path, artifact_id)
+                                    if os.path.exists(lib_base_dir):
+                                        versions = [d for d in os.listdir(lib_base_dir) if os.path.isdir(os.path.join(lib_base_dir, d))]
+                                        if versions:
+                                            # Verificar que exista el JAR
+                                            found_jar = False
+                                            for version in versions:
+                                                jar_name = f"{artifact_id}-{version}.jar"
+                                                jar_path = os.path.join(lib_base_dir, version, jar_name)
+                                                if os.path.exists(jar_path):
+                                                    found_jar = True
+                                                    print(f"[ERROR]   ✓ {group_id}:{artifact_id}:{version} encontrado")
+                                                    break
+                                            if not found_jar:
+                                                print(f"[ERROR]   ✗ {group_id}:{artifact_id} versiones encontradas pero sin JAR: {versions}")
+                                        else:
+                                            print(f"[ERROR]   ✗ {group_id}:{artifact_id} directorio vacío: {lib_base_dir}")
+                                    else:
+                                        print(f"[ERROR]   ✗ {group_id}:{artifact_id} no encontrado: {lib_base_dir}")
+                                
                                 return False, None
                                     
                             # Construir el module path con solo los JARs válidos, en el orden original del JSON
@@ -1077,6 +1136,7 @@ class MinecraftLauncher:
         
         collect_libraries(version_json, visited_versions)
         
+        missing_libs = []
         for lib in all_libraries:
             # Verificar reglas
             if "rules" in lib:
@@ -1085,10 +1145,11 @@ class MinecraftLauncher:
             
             libraries_required += 1
             lib_path = None
+            lib_name = lib.get("name", "desconocida")
+            
             if "downloads" in lib and "artifact" in lib["downloads"]:
                 lib_path = lib["downloads"]["artifact"].get("path")
             if not lib_path:
-                lib_name = lib.get("name", "")
                 if lib_name:
                     lib_path = self._maven_name_to_path(lib_name)
             
@@ -1096,10 +1157,73 @@ class MinecraftLauncher:
                 full_path = os.path.join(libraries_dir, lib_path)
                 if os.path.exists(full_path):
                     libraries_found += 1
+                else:
+                    missing_libs.append({
+                        "name": lib_name,
+                        "path": lib_path,
+                        "full_path": full_path
+                    })
+            else:
+                missing_libs.append({
+                    "name": lib_name,
+                    "path": None,
+                    "full_path": None,
+                    "reason": "No se pudo construir ruta"
+                })
         
         # Considerar descargada si tiene al menos el 80% de las librerías o si no hay librerías
         if libraries_required == 0:
             return True
+        
+        # Si faltan librerías, mostrar información de debug
+        if libraries_found < libraries_required:
+            missing_count = libraries_required - libraries_found
+            percentage = (libraries_found / libraries_required * 100) if libraries_required > 0 else 0
+            print(f"[DEBUG] Verificación de librerías del perfil:")
+            print(f"[DEBUG]   Librerías requeridas: {libraries_required}")
+            print(f"[DEBUG]   Librerías encontradas: {libraries_found} ({percentage:.1f}%)")
+            print(f"[DEBUG]   Librerías faltantes: {missing_count}")
+            
+            if missing_libs:
+                print(f"[DEBUG]   Primeras 10 librerías faltantes:")
+                for i, missing in enumerate(missing_libs[:10], 1):
+                    if missing["full_path"]:
+                        print(f"[DEBUG]     {i}. {missing['name']}")
+                        print(f"[DEBUG]        Ruta esperada: {missing['full_path']}")
+                    else:
+                        print(f"[DEBUG]     {i}. {missing['name']} - {missing.get('reason', 'Ruta no disponible')}")
+                if len(missing_libs) > 10:
+                    print(f"[DEBUG]     ... y {len(missing_libs) - 10} más")
+            
+            # Verificar librerías críticas específicamente
+            critical_libs = [
+                ("cpw.mods", "bootstraplauncher"),
+                ("cpw.mods", "securejarhandler"),
+                ("org.ow2.asm", "asm"),
+                ("net.neoforged", "JarJarFileSystems")
+            ]
+            print(f"[DEBUG]   Verificando librerías críticas del module path:")
+            for group_id, artifact_id in critical_libs:
+                group_path = group_id.replace(".", os.path.sep)
+                lib_base_dir = os.path.join(libraries_dir, group_path, artifact_id)
+                if os.path.exists(lib_base_dir):
+                    versions = [d for d in os.listdir(lib_base_dir) if os.path.isdir(os.path.join(lib_base_dir, d))]
+                    if versions:
+                        found_jar = False
+                        for version in versions:
+                            jar_name = f"{artifact_id}-{version}.jar"
+                            jar_path = os.path.join(lib_base_dir, version, jar_name)
+                            if os.path.exists(jar_path):
+                                found_jar = True
+                                print(f"[DEBUG]     ✓ {group_id}:{artifact_id}:{version}")
+                                break
+                        if not found_jar:
+                            print(f"[DEBUG]     ✗ {group_id}:{artifact_id} (versiones encontradas pero sin JAR)")
+                    else:
+                        print(f"[DEBUG]     ✗ {group_id}:{artifact_id} (directorio vacío)")
+                else:
+                    print(f"[DEBUG]     ✗ {group_id}:{artifact_id} (no encontrado)")
+        
         return libraries_found >= (libraries_required * 0.8)
     
     def get_available_versions(self, only_downloaded: bool = True, strict_check: bool = True) -> list:
@@ -1299,7 +1423,7 @@ class MinecraftLauncher:
         return merged
     
     def _maven_name_to_path(self, name: str) -> Optional[str]:
-        """Convierte un nombre Maven (group:artifact:version) a ruta de archivo"""
+        """Convierte un nombre Maven (group:artifact:version[:classifier]) a ruta de archivo"""
         parts = name.split(':')
         if len(parts) < 3:
             return None
@@ -1307,9 +1431,18 @@ class MinecraftLauncher:
         group_id = parts[0].replace('.', '/')
         artifact_id = parts[1]
         version = parts[2]
+        classifier = parts[3] if len(parts) > 3 else None
         
-        # Construir ruta: group/artifact/version/artifact-version.jar
-        path = f"{group_id}/{artifact_id}/{version}/{artifact_id}-{version}.jar"
+        # Construir nombre del archivo
+        if classifier:
+            # Con clasificador: artifact-version-classifier.jar
+            filename = f"{artifact_id}-{version}-{classifier}.jar"
+        else:
+            # Sin clasificador: artifact-version.jar
+            filename = f"{artifact_id}-{version}.jar"
+        
+        # Construir ruta: group/artifact/version/artifact-version[-classifier].jar
+        path = f"{group_id}/{artifact_id}/{version}/{filename}"
         return path
     
     def _build_classpath(self, version_json: Dict, version: str, game_dir: Optional[str] = None) -> Optional[str]:
@@ -2130,6 +2263,10 @@ class MinecraftLauncher:
         # Usar game_dir si se proporciona, sino usar self.minecraft_path
         actual_game_dir = game_dir if game_dir else self.minecraft_path
         
+        # CRÍTICO: Los assets siempre van al directorio global, no al perfil
+        # El gameDir va al perfil (para mods, resource packs, shaders, config)
+        assets_dir = self.minecraft_path  # Siempre usar el directorio global para assets
+        
         # Versiones modernas: usar arguments.game
         if "arguments" in version_json and "game" in version_json["arguments"]:
             for arg in version_json["arguments"]["game"]:
@@ -2137,7 +2274,7 @@ class MinecraftLauncher:
                     # Reemplazar variables
                     arg = arg.replace("${version_name}", version)
                     arg = arg.replace("${version_type}", version_json.get("type", "release"))
-                    arg = arg.replace("${assets_root}", os.path.join(actual_game_dir, "assets"))
+                    arg = arg.replace("${assets_root}", os.path.join(assets_dir, "assets"))
                     arg = arg.replace("${assets_index_name}", version_json.get("assetIndex", {}).get("id", version))
                     arg = arg.replace("${auth_uuid}", credentials.get("uuid", ""))
                     arg = arg.replace("${auth_access_token}", credentials.get("access_token", ""))
@@ -2145,7 +2282,7 @@ class MinecraftLauncher:
                     arg = arg.replace("${user_type}", "mojang")
                     arg = arg.replace("${version_type}", version_json.get("type", "release"))
                     arg = arg.replace("${game_directory}", actual_game_dir)
-                    arg = arg.replace("${game_assets}", os.path.join(actual_game_dir, "assets", "virtual", "legacy"))
+                    arg = arg.replace("${game_assets}", os.path.join(assets_dir, "assets", "virtual", "legacy"))
                     arg = arg.replace("${user_properties}", "{}")
                     
                     # Reemplazar variables de quick play con valores vacíos (no usamos quick play)
@@ -2169,14 +2306,14 @@ class MinecraftLauncher:
                                 if isinstance(value, str):
                                     value = value.replace("${version_name}", version)
                                     value = value.replace("${version_type}", version_json.get("type", "release"))
-                                    value = value.replace("${assets_root}", os.path.join(actual_game_dir, "assets"))
+                                    value = value.replace("${assets_root}", os.path.join(assets_dir, "assets"))
                                     value = value.replace("${assets_index_name}", version_json.get("assetIndex", {}).get("id", version))
                                     value = value.replace("${auth_uuid}", credentials.get("uuid", ""))
                                     value = value.replace("${auth_access_token}", credentials.get("access_token", ""))
                                     value = value.replace("${auth_player_name}", credentials.get("username", "Player"))
                                     value = value.replace("${user_type}", "mojang")
                                     value = value.replace("${game_directory}", actual_game_dir)
-                                    value = value.replace("${game_assets}", os.path.join(actual_game_dir, "assets", "virtual", "legacy"))
+                                    value = value.replace("${game_assets}", os.path.join(assets_dir, "assets", "virtual", "legacy"))
                                     value = value.replace("${user_properties}", "{}")
                                     
                                     # Reemplazar variables de quick play con valores vacíos
@@ -2202,14 +2339,14 @@ class MinecraftLauncher:
                 # Reemplazar variables
                 arg = arg.replace("${version_name}", version)
                 arg = arg.replace("${version_type}", version_json.get("type", "release"))
-                arg = arg.replace("${assets_root}", os.path.join(actual_game_dir, "assets"))
+                arg = arg.replace("${assets_root}", os.path.join(assets_dir, "assets"))
                 arg = arg.replace("${assets_index_name}", version_json.get("assetIndex", {}).get("id", version))
                 arg = arg.replace("${auth_uuid}", credentials.get("uuid", ""))
                 arg = arg.replace("${auth_access_token}", credentials.get("access_token", ""))
                 arg = arg.replace("${auth_player_name}", credentials.get("username", "Player"))
                 arg = arg.replace("${user_type}", "mojang")
                 arg = arg.replace("${game_directory}", actual_game_dir)
-                arg = arg.replace("${game_assets}", os.path.join(actual_game_dir, "assets", "virtual", "legacy"))
+                arg = arg.replace("${game_assets}", os.path.join(assets_dir, "assets", "virtual", "legacy"))
                 arg = arg.replace("${user_properties}", "{}")
                 
                 # Reemplazar variables de quick play con valores vacíos
@@ -2229,7 +2366,7 @@ class MinecraftLauncher:
                 "--username", credentials.get("username", "Player"),
                 "--version", version,
                 "--gameDir", actual_game_dir,
-                "--assetsDir", os.path.join(actual_game_dir, "assets"),
+                "--assetsDir", os.path.join(assets_dir, "assets"),
                 "--assetIndex", version_json.get("assetIndex", {}).get("id", version),
                 "--uuid", credentials.get("uuid", ""),
                 "--accessToken", credentials.get("access_token", ""),

@@ -27,6 +27,7 @@ from auth_manager import AuthManager
 from credential_storage import CredentialStorage
 from minecraft_launcher import MinecraftLauncher
 from server_manager import ServerManagerDialog, fetch_profiles_json
+from asset_downloader import AssetDownloader
 
 class LoadVersionsThread(QThread):
     """Thread para cargar versiones de Minecraft sin bloquear la UI"""
@@ -130,7 +131,7 @@ class DownloadVersionThread(QThread):
         return True
     
     def _maven_name_to_path(self, name):
-        """Convierte un nombre Maven (group:artifact:version) a ruta de archivo"""
+        """Convierte un nombre Maven (group:artifact:version[:classifier]) a ruta de archivo"""
         parts = name.split(':')
         if len(parts) < 3:
             return None
@@ -138,9 +139,18 @@ class DownloadVersionThread(QThread):
         group_id = parts[0].replace('.', '/')
         artifact_id = parts[1]
         version = parts[2]
+        classifier = parts[3] if len(parts) > 3 else None
         
-        # Construir ruta: group/artifact/version/artifact-version.jar
-        path = f"{group_id}/{artifact_id}/{version}/{artifact_id}-{version}.jar"
+        # Construir nombre del archivo
+        if classifier:
+            # Con clasificador: artifact-version-classifier.jar
+            filename = f"{artifact_id}-{version}-{classifier}.jar"
+        else:
+            # Sin clasificador: artifact-version.jar
+            filename = f"{artifact_id}-{version}.jar"
+        
+        # Construir ruta: group/artifact/version/artifact-version[-classifier].jar
+        path = f"{group_id}/{artifact_id}/{version}/{filename}"
         return path
     
     def _download_library(self, library, libraries_dir, progress_base, progress_max):
@@ -153,33 +163,73 @@ class DownloadVersionThread(QThread):
         downloads = library.get("downloads", {})
         artifact = downloads.get("artifact")
         
-        if not artifact:
-            # Si no hay artifact en downloads, intentar construir desde name
-            lib_name = library.get("name", "")
-            if not lib_name:
-                return True  # No hay información de descarga, saltar
-            
-            # Construir path desde name
-            lib_path = self._maven_name_to_path(lib_name)
-            if not lib_path:
-                return True  # No se pudo construir path, saltar
-            
-            # Verificar si ya existe
-            full_path = os.path.join(libraries_dir, lib_path)
-            if os.path.exists(full_path):
-                return True  # Ya existe, no descargar
-            
-            # No hay URL disponible, no podemos descargarla
-            return True  # Saltar librerías sin URL
+        lib_name = library.get("name", "")
+        if not lib_name:
+            return True  # No hay nombre, saltar
         
-        # Obtener URL y path
-        lib_url = artifact.get("url")
-        lib_path = artifact.get("path")
+        # Extraer clasificador del nombre si existe (formato: group:artifact:version:classifier)
+        parts = lib_name.split(':')
+        classifier = parts[3] if len(parts) > 3 else None
         
-        if not lib_url or not lib_path:
-            return True  # No hay URL o path, saltar
+        # Si hay clasificador, buscar en downloads.classifiers
+        classifier_download = None
+        if classifier and "classifiers" in downloads:
+            classifier_download = downloads["classifiers"].get(classifier)
+        
+        # Construir path desde name
+        lib_path = self._maven_name_to_path(lib_name)
+        if not lib_path:
+            return True  # No se pudo construir path, saltar
         
         # Verificar si ya existe
+        full_path = os.path.join(libraries_dir, lib_path)
+        if os.path.exists(full_path):
+            return True  # Ya existe, no descargar
+        
+        # Obtener URL y path
+        lib_url = None
+        # Prioridad: classifier_download > artifact
+        if classifier_download:
+            lib_url = classifier_download.get("url")
+            classifier_path = classifier_download.get("path")
+            if classifier_path:
+                lib_path = classifier_path
+                full_path = os.path.join(libraries_dir, lib_path)
+                if os.path.exists(full_path):
+                    return True
+        elif artifact:
+            lib_url = artifact.get("url")
+            artifact_path = artifact.get("path")
+            if artifact_path:
+                lib_path = artifact_path
+                full_path = os.path.join(libraries_dir, lib_path)
+                if os.path.exists(full_path):
+                    return True
+        
+        if not lib_url:
+            # Si no hay URL disponible, intentar construirla desde repositorios Maven
+            repos = [
+                f"https://libraries.minecraft.net/{lib_path}",
+                f"https://maven.neoforged.net/releases/{lib_path}",
+                f"https://repo1.maven.org/maven2/{lib_path}"
+            ]
+            
+            for repo_url in repos:
+                try:
+                    head_response = requests.head(repo_url, timeout=10, allow_redirects=True)
+                    if head_response.status_code == 200:
+                        lib_url = repo_url
+                        break
+                except:
+                    continue
+            
+            if not lib_url:
+                return True  # No se pudo encontrar URL, saltar
+        
+        if not lib_path:
+            return True  # No hay path, saltar
+        
+        # Verificar si ya existe (ya se verificó arriba, pero verificar de nuevo con el path final)
         full_path = os.path.join(libraries_dir, lib_path)
         if os.path.exists(full_path):
             return True  # Ya existe, no descargar
@@ -1050,9 +1100,32 @@ class InstallProfileThread(QThread):
             if version_type == "neoforge":
                 self.progress.emit(10, 100, "Instalando NeoForge...")
                 self._install_neoforge(version_base, profile_dir, profile_name)
+                # Obtener la versión instalada para descargar assets
+                neoforge_version = version_base.get("neoforge_version")
+                minecraft_version = version_base.get("minecraft_version")
+                expected_version_id = f"neoforge-{neoforge_version}"
+                version_json_path = os.path.join(profile_dir, "versions", expected_version_id, f"{expected_version_id}.json")
             elif version_type == "vanilla":
                 self.progress.emit(10, 100, "Instalando versión Vanilla...")
                 self._install_vanilla(version_base, profile_dir, profile_name)
+                # Obtener la versión instalada para descargar assets
+                minecraft_version = version_base.get("minecraft_version")
+                version_json_path = os.path.join(profile_dir, "versions", minecraft_version, f"{minecraft_version}.json")
+            
+            # Descargar assets para el perfil (usando el directorio global de assets)
+            if os.path.exists(version_json_path):
+                self.progress.emit(35, 100, "Descargando assets...")
+                try:
+                    with open(version_json_path, 'r', encoding='utf-8') as f:
+                        version_json = json.load(f)
+                    
+                    # Los assets siempre van al directorio global, no al perfil
+                    assets_dir = os.path.join(self.minecraft_path, "assets")
+                    asset_downloader = AssetDownloader(assets_dir, progress_callback=self.progress.emit)
+                    downloaded, total = asset_downloader.download_assets(version_json)
+                    print(f"[INFO] Assets descargados: {downloaded}/{total}")
+                except Exception as e:
+                    print(f"[WARN] Error descargando assets: {e}")
             
             # Paso 2: Descargar mods
             mods = self.profile.get("mods", [])
@@ -1262,10 +1335,56 @@ class InstallProfileThread(QThread):
         collect_libraries(version_json, visited_versions)
         
         total_libs = len(all_libraries)
+        downloaded_count = 0
+        skipped_count = 0
+        failed_count = 0
+        
         for i, library in enumerate(all_libraries):
             progress = 60 + int((i / total_libs) * 30) if total_libs > 0 else 60
-            self.progress.emit(progress, 100, f"Descargando librerías ({i + 1}/{total_libs})...")
-            self._download_library(library, libraries_dir, 0, 100)
+            lib_name = library.get("name", "desconocida")
+            self.progress.emit(progress, 100, f"Descargando librerías ({i + 1}/{total_libs}): {lib_name.split(':')[-2] if ':' in lib_name else lib_name}")
+            
+            result = self._download_library(library, libraries_dir, 0, 100)
+            if result:
+                downloaded_count += 1
+            else:
+                failed_count += 1
+                print(f"[WARN] Falló la descarga de librería: {lib_name}")
+        
+        print(f"[INFO] Librerías descargadas: {downloaded_count}/{total_libs}, fallidas: {failed_count}, saltadas: {skipped_count}")
+        
+        # Verificar que las librerías críticas del module path estén presentes
+        critical_libs = [
+            "cpw.mods:bootstraplauncher:2.0.2",
+            "cpw.mods:securejarhandler:3.0.8",
+            "org.ow2.asm:asm:9.8",
+            "org.ow2.asm:asm-commons:9.8",
+            "org.ow2.asm:asm-util:9.8",
+            "org.ow2.asm:asm-analysis:9.8",
+            "org.ow2.asm:asm-tree:9.8",
+            "net.neoforged:JarJarFileSystems:0.4.1"
+        ]
+        
+        missing_critical = []
+        for lib_name in critical_libs:
+            lib_path = self._maven_name_to_path(lib_name)
+            if lib_path:
+                full_path = os.path.join(libraries_dir, lib_path)
+                if not os.path.exists(full_path):
+                    missing_critical.append(lib_name)
+                    print(f"[WARN] Librería crítica faltante: {lib_name} -> {full_path}")
+        
+        if missing_critical:
+            print(f"[WARN] Faltan {len(missing_critical)} librerías críticas. Intentando descargarlas...")
+            for lib_name in missing_critical:
+                # Crear un objeto library mínimo para descargar
+                lib_obj = {"name": lib_name}
+                print(f"[DEBUG] Intentando descargar librería crítica: {lib_name}")
+                result = self._download_library(lib_obj, libraries_dir, 0, 100)
+                if result:
+                    print(f"[INFO] Librería crítica descargada: {lib_name}")
+                else:
+                    print(f"[ERROR] No se pudo descargar librería crítica: {lib_name}")
         
         # Verificar que los archivos existen
         if not os.path.exists(version_json_path):
@@ -1398,11 +1517,23 @@ class InstallProfileThread(QThread):
         collect_libraries(version_json, visited_versions)
         
         total_libs = len(all_libraries)
+        downloaded_count = 0
+        failed_count = 0
+        
         for i, library in enumerate(all_libraries):
-            self._download_library(library, libraries_dir, 0, 100)
+            lib_name = library.get("name", "desconocida")
+            print(f"[DEBUG] Procesando librería {i+1}/{total_libs}: {lib_name}")
+            result = self._download_library(library, libraries_dir, 0, 100)
+            if result:
+                downloaded_count += 1
+            else:
+                failed_count += 1
+                print(f"[WARN] Falló la descarga de librería: {lib_name}")
+        
+        print(f"[INFO] Librerías procesadas: {downloaded_count} descargadas, {failed_count} fallidas de {total_libs} totales")
     
     def _maven_name_to_path(self, name):
-        """Convierte un nombre Maven (group:artifact:version) a ruta de archivo"""
+        """Convierte un nombre Maven (group:artifact:version[:classifier]) a ruta de archivo"""
         parts = name.split(':')
         if len(parts) < 3:
             return None
@@ -1410,9 +1541,18 @@ class InstallProfileThread(QThread):
         group_id = parts[0].replace('.', '/')
         artifact_id = parts[1]
         version = parts[2]
+        classifier = parts[3] if len(parts) > 3 else None
         
-        # Construir ruta: group/artifact/version/artifact-version.jar
-        path = f"{group_id}/{artifact_id}/{version}/{artifact_id}-{version}.jar"
+        # Construir nombre del archivo
+        if classifier:
+            # Con clasificador: artifact-version-classifier.jar
+            filename = f"{artifact_id}-{version}-{classifier}.jar"
+        else:
+            # Sin clasificador: artifact-version.jar
+            filename = f"{artifact_id}-{version}.jar"
+        
+        # Construir ruta: group/artifact/version/artifact-version[-classifier].jar
+        path = f"{group_id}/{artifact_id}/{version}/{filename}"
         return path
     
     def _download_library(self, library, libraries_dir, progress_base, progress_max):
@@ -1427,21 +1567,44 @@ class InstallProfileThread(QThread):
         
         lib_name = library.get("name", "")
         if not lib_name:
+            print(f"[DEBUG] Librería sin nombre, saltando")
             return True  # No hay nombre, saltar
+        
+        # Extraer clasificador del nombre si existe (formato: group:artifact:version:classifier)
+        parts = lib_name.split(':')
+        classifier = parts[3] if len(parts) > 3 else None
+        
+        # Si hay clasificador, buscar en downloads.classifiers
+        classifier_download = None
+        if classifier and "classifiers" in downloads:
+            classifier_download = downloads["classifiers"].get(classifier)
         
         # Construir path desde name
         lib_path = self._maven_name_to_path(lib_name)
         if not lib_path:
+            print(f"[WARN] No se pudo construir path para librería: {lib_name}")
             return True  # No se pudo construir path, saltar
         
         # Verificar si ya existe
         full_path = os.path.join(libraries_dir, lib_path)
         if os.path.exists(full_path):
+            print(f"[DEBUG] Librería ya existe, saltando: {lib_name} -> {full_path}")
             return True  # Ya existe, no descargar
         
         # Obtener URL y path
         lib_url = None
-        if artifact:
+        # Prioridad: classifier_download > artifact
+        if classifier_download:
+            lib_url = classifier_download.get("url")
+            # Si hay path en classifier_download, usarlo
+            classifier_path = classifier_download.get("path")
+            if classifier_path:
+                lib_path = classifier_path
+                full_path = os.path.join(libraries_dir, lib_path)
+                # Verificar de nuevo con el path del classifier
+                if os.path.exists(full_path):
+                    return True
+        elif artifact:
             lib_url = artifact.get("url")
             # Si hay path en artifact, usarlo (puede ser diferente al construido)
             artifact_path = artifact.get("path")
@@ -1473,12 +1636,25 @@ class InstallProfileThread(QThread):
                         lib_url = repo_url
                         print(f"[DEBUG] URL construida para {lib_name}: {lib_url}")
                         break
-                except:
+                except Exception as e:
+                    print(f"[DEBUG] Error al verificar {repo_url}: {e}")
                     continue
             
             if not lib_url:
-                print(f"[WARN] No se pudo encontrar URL para librería: {lib_name}")
-                return True  # No se pudo encontrar URL, saltar
+                print(f"[WARN] No se pudo encontrar URL para librería: {lib_name} (path: {lib_path})")
+                # Intentar descargar directamente desde Maven Central como último recurso
+                try:
+                    maven_central_url = f"https://repo1.maven.org/maven2/{lib_path}"
+                    test_response = requests.head(maven_central_url, timeout=10, allow_redirects=True)
+                    if test_response.status_code == 200:
+                        lib_url = maven_central_url
+                        print(f"[DEBUG] URL encontrada en Maven Central: {lib_url}")
+                    else:
+                        print(f"[WARN] Maven Central también falló (status: {test_response.status_code})")
+                        return True  # No se pudo encontrar URL, saltar
+                except Exception as e:
+                    print(f"[WARN] Error al intentar Maven Central: {e}")
+                    return True  # No se pudo encontrar URL, saltar
         
         if not lib_url:
             return True  # No hay URL, saltar
@@ -1489,6 +1665,7 @@ class InstallProfileThread(QThread):
         
         # Descargar la librería
         try:
+            print(f"[DEBUG] Descargando {lib_name} desde {lib_url}...")
             response = requests.get(lib_url, stream=True, timeout=60)
             response.raise_for_status()
             
@@ -1501,10 +1678,19 @@ class InstallProfileThread(QThread):
                         f.write(chunk)
                         downloaded += len(chunk)
             
-            print(f"[DEBUG] Librería descargada: {lib_name} -> {full_path}")
+            print(f"[DEBUG] Librería descargada exitosamente: {lib_name} -> {full_path} ({downloaded} bytes)")
             return True
+        except requests.exceptions.HTTPError as e:
+            print(f"[ERROR] Error HTTP descargando librería {lib_name}: {e.response.status_code} - {e.response.reason}")
+            # Si falla, eliminar archivo parcial
+            if os.path.exists(full_path):
+                try:
+                    os.remove(full_path)
+                except:
+                    pass
+            return False
         except Exception as e:
-            print(f"[WARN] Error descargando librería {lib_path}: {e}")
+            print(f"[ERROR] Error descargando librería {lib_name} ({lib_path}): {type(e).__name__}: {e}")
             # Si falla, eliminar archivo parcial
             if os.path.exists(full_path):
                 try:
