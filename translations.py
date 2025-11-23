@@ -31,7 +31,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "configuration_loaded": "Configuración cargada",
         "validating_session": "Validando sesión...",
         "active_session": "Sesión activa para: {username} ({time} restantes)",
-        "versions_available": "Versiones de Minecraft disponibles: {count} (solo descargadas)",
+        "versions_available": "Minecraft versions available: {count} (downloaded only)",
         "version_restored": "Versión restaurada: {version}",
         "version_selected": "Versión {version} seleccionada",
         "java_auto_selected": "Java {version} seleccionada automáticamente (requiere {required}+)",
@@ -104,7 +104,11 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "verifying_libraries": "Verificando que todas las librerías estén descargadas...",
         "all_libraries_downloaded": "✓ Todas las librerías están descargadas",
         "verifying_java_requirements": "Verificando requisitos de Java...",
-        "java_required": "Java requerida: versión {version}",
+        "java_required": "Java Requerida",
+        "java_required_message": "Esta versión de Minecraft requiere Java {version}.\n\nVersiones de Java disponibles: {available}\n\n¿Deseas descargar Java {version} automáticamente?",
+        "java_detected": "Java detectada: versión {version}",
+        "none": "Ninguna",
+        "libraries_incomplete_profile_message": "El perfil no tiene todas las librerías necesarias descargadas.\n\nPor favor, reinstala el perfil o verifica que la instalación se completó correctamente.",
         
         # Asset download
         "assets_incomplete": "Assets incompletos ({valid}/{total}), descargando...",

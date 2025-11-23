@@ -75,7 +75,7 @@ class LaunchMinecraftThread(QThread):
     
     def run(self):
         try:
-            self.message.emit("Iniciando proceso de Minecraft...")
+            self.message.emit(tr("starting_minecraft"))
             # Crear callback para pasar mensajes al signal
             def message_callback(msg):
                 self.message.emit(msg)
@@ -4153,7 +4153,7 @@ class LauncherWindow(QMainWindow):
                 # (verificamos si _version_to_select existía antes de limpiarlo)
                 was_new_download = hasattr(self, '_version_to_select_was_set') and self._version_to_select_was_set
                 if was_new_download:
-                    self.add_message(f"Versión {version_to_select} seleccionada")
+                    self.add_message(tr("version_selected_message", version=version_to_select))
                     self._version_to_select_was_set = False  # Limpiar flag
                 else:
                     self.add_message(tr("version_restored", version=version_to_select))
@@ -4167,7 +4167,7 @@ class LauncherWindow(QMainWindow):
             else:
                 # Si no hay versión guardada o no está disponible, seleccionar la primera
                 if version_to_select:
-                    self.add_message(f"Versión '{version_to_select}' no está disponible, seleccionando primera versión")
+                    self.add_message(tr("version_not_available", version=version_to_select))
                 # Actualizar el fondo para la primera versión seleccionada (sin hacer merge)
                 if organized_versions:
                     first_version_id = organized_versions[0][1]
@@ -4270,7 +4270,7 @@ class LauncherWindow(QMainWindow):
                 self.version_combo.blockSignals(True)
                 self.version_combo.setCurrentIndex(index)
                 self.version_combo.blockSignals(False)
-                self.add_message(f"Versión restaurada: {last_version}")
+                self.add_message(tr("version_restored", version=last_version))
                 # Actualizar el fondo según la versión restaurada (sin hacer merge)
                 display_name = self.version_combo.currentText()
                 self._update_background_for_version(last_version, display_name)
@@ -4281,7 +4281,7 @@ class LauncherWindow(QMainWindow):
             else:
                 # Si no hay versión guardada o no está disponible, seleccionar la primera
                 if last_version:
-                    self.add_message(f"Versión guardada '{last_version}' no está disponible, seleccionando primera versión")
+                    self.add_message(tr("version_not_available", version=last_version))
                 # Actualizar el fondo para la primera versión seleccionada (sin hacer merge)
                 if organized_versions:
                     first_version_id = organized_versions[0][1]
@@ -4397,14 +4397,14 @@ class LauncherWindow(QMainWindow):
                     display_text = f"Java {version}"
                 self.java_combo.addItem(display_text, path)  # Guardar el path como data
             
-            self.add_message(f"Versiones de Java disponibles: {len(java_installations)}")
+            self.add_message(tr("java_versions_available", count=len(java_installations)))
             # Seleccionar la versión más reciente por defecto
             if sorted_versions:
                 self.java_combo.setCurrentIndex(0)
         else:
             self.java_combo.addItem("No hay Java disponible")
             self.java_combo.setEnabled(False)
-            self.add_message("No se encontraron instalaciones de Java")
+            self.add_message(tr("no_java_installations"))
     
     def download_java_async(self, java_version: int, callback=None):
         """
@@ -5648,32 +5648,31 @@ class LauncherWindow(QMainWindow):
                 print(f"[WARN] No se encontró launcher_profiles.json en: {launcher_profiles_path}")
         
         print(f"[DEBUG] Versión final a usar: {actual_version}, game_dir: {game_dir}")
-        self.add_message(f"Versión seleccionada: {actual_version}")
+        self.add_message(tr("version_selected_message", version=actual_version))
         if game_dir:
-            self.add_message(f"Directorio del perfil: {game_dir}")
+            self.add_message(tr("profile_directory", path=game_dir))
         
         # Si es un perfil custom, verificar que todas las librerías estén descargadas
         if game_dir:
-            self.add_message("Verificando que todas las librerías estén descargadas...")
+            self.add_message(tr("verifying_libraries"))
             if not self.minecraft_launcher.is_profile_version_downloaded(actual_version, game_dir, strict=True):
                 QMessageBox.warning(
                     self,
-                    "Librerías incompletas",
-                    f"El perfil no tiene todas las librerías necesarias descargadas.\n\n"
-                    f"Por favor, reinstala el perfil o verifica que la instalación se completó correctamente."
+                    tr("error"),
+                    tr("libraries_incomplete_profile_message")
                 )
-                self.add_message("Error: Librerías incompletas, no se puede lanzar")
+                self.add_message(tr("libraries_incomplete"))
                 return
-            self.add_message("✓ Todas las librerías están descargadas")
+            self.add_message(tr("all_libraries_downloaded"))
         
         # Verificar requisitos de Java
-        self.add_message("Verificando requisitos de Java...")
+        self.add_message(tr("verifying_java_requirements"))
         version_json = self.minecraft_launcher._load_version_json(actual_version, game_dir=game_dir)
         required_java = None
         if version_json:
             required_java = self.minecraft_launcher.get_required_java_version(version_json)
             if required_java:
-                self.add_message(f"Java requerida: versión {required_java}")
+                self.add_message(tr("java_required_version", version=required_java))
         
         # Obtener la versión de Java seleccionada
         selected_java_path = None
@@ -5708,26 +5707,25 @@ class LauncherWindow(QMainWindow):
             
             # Si no hay Java adecuada y no se seleccionó una manualmente, descargar
             if not suitable_java and not selected_java_path:
+                java_versions_str = ', '.join(map(str, sorted(java_installations.keys()))) if java_installations else tr("none")
                 reply = QMessageBox.question(
                     self,
-                    "Java Requerida",
-                    f"Esta version de Minecraft requiere Java {required_java}.\n\n"
-                    f"Versiones de Java disponibles: {sorted(java_installations.keys()) if java_installations else 'Ninguna'}\n\n"
-                    f"¿Deseas descargar Java {required_java} automaticamente?",
+                    tr("java_required"),
+                    tr("java_required_message", version=required_java, available=java_versions_str),
                     QMessageBox.Yes | QMessageBox.No
                 )
                 
                 if reply == QMessageBox.Yes:
-                    self.add_message(f"Descargando Java {required_java}...")
+                    self.add_message(tr("downloading_java", version=required_java))
                     
                     def on_java_downloaded(success, java_path):
                         if success and java_path:
-                            self.add_message(f"Java {required_java} descargada correctamente")
+                            self.add_message(tr("java_downloaded", version=required_java))
                             # Recargar versiones de Java
                             self.load_java_versions()
                             # Continuar con el lanzamiento
-                            self.add_message(f"Lanzando Minecraft version: {actual_version}")
-                            self.add_message(f"Usando Java: {java_path}")
+                            self.add_message(tr("launching_minecraft_version", version=actual_version))
+                            self.add_message(tr("using_java", path=java_path))
                             self.launch_button.setEnabled(False)
                             
                             # Lanzar en un thread para no bloquear la UI
@@ -5742,7 +5740,7 @@ class LauncherWindow(QMainWindow):
                             self.launch_minecraft_thread.finished.connect(self.on_minecraft_launched)
                             self.launch_minecraft_thread.start()
                         else:
-                            self.add_message("Descarga de Java cancelada o falló")
+                            self.add_message(tr("java_download_cancelled"))
                             self.launch_button.setEnabled(True)
                     
                     self.download_java_async(required_java, on_java_downloaded)
@@ -5760,12 +5758,12 @@ class LauncherWindow(QMainWindow):
                 selected_java_path = suitable_java
         
         self.add_message("=" * 50)
-        self.add_message(f"Lanzando Minecraft versión: {actual_version}")
+        self.add_message(tr("launching_minecraft", version=actual_version))
         if selected_java_path:
-            self.add_message(f"Usando Java: {selected_java_path}")
+            self.add_message(tr("using_java", path=selected_java_path))
         if game_dir:
-            self.add_message(f"Usando perfil custom: {game_dir}")
-        self.add_message("Preparando lanzamiento...")
+            self.add_message(tr("using_custom_profile", path=game_dir))
+        self.add_message(tr("preparing_launch"))
         self.launch_button.setEnabled(False)
         
         # Lanzar en un thread para no bloquear la UI
@@ -5783,10 +5781,10 @@ class LauncherWindow(QMainWindow):
     def on_minecraft_launched(self, success, detected_java_version):
         """Callback cuando el thread de lanzamiento termina"""
         if success:
-            self.add_message("✓ Proceso de Minecraft iniciado correctamente")
-            self.add_message("El juego debería abrirse en breve...")
+            self.add_message(tr("minecraft_started_success"))
+            self.add_message(tr("game_should_open_soon"))
             if detected_java_version:
-                self.add_message(f"Java detectada: versión {detected_java_version}")
+                self.add_message(tr("java_detected", version=detected_java_version))
         else:
             self.add_message("✗ Error al lanzar Minecraft")
             self.add_message("Revisa los mensajes de error anteriores")
