@@ -5186,6 +5186,18 @@ class LauncherWindow(QMainWindow):
                         except Exception as e:
                             print(f"[WARN] Error descargando mod {mod_name}: {e}")
                     # TODO: Podríamos verificar hash o fecha de modificación para actualizar mods existentes
+                
+                # Eliminar mods que ya no están en el servidor
+                mods_to_remove = installed_mods - server_mod_names
+                for mod_to_remove in mods_to_remove:
+                    mod_path_to_remove = os.path.join(mods_dir, mod_to_remove)
+                    try:
+                        if os.path.exists(mod_path_to_remove):
+                            os.remove(mod_path_to_remove)
+                            print(f"[INFO] Mod eliminado (ya no está en el servidor): {mod_to_remove}")
+                            self.add_message(tr("mod_removed", name=mod_to_remove))
+                    except Exception as e:
+                        print(f"[WARN] Error eliminando mod {mod_to_remove}: {e}")
             
             # Comparar y actualizar shaders
             server_shaders = server_profile.get("shaders", [])
@@ -5202,6 +5214,8 @@ class LauncherWindow(QMainWindow):
                 base_url = profiles_data.get("server_url", f"http://{hostname}:25080")
                 if not base_url.startswith("http"):
                     base_url = f"http://{base_url}"
+                
+                server_shader_names = {shader.get("name") for shader in server_shaders}
                 
                 for shader in server_shaders:
                     shader_name = shader.get("name")
@@ -5226,6 +5240,18 @@ class LauncherWindow(QMainWindow):
                             print(f"[INFO] Shader descargado: {shader_name}")
                         except Exception as e:
                             print(f"[WARN] Error descargando shader {shader_name}: {e}")
+                
+                # Eliminar shaders que ya no están en el servidor
+                shaders_to_remove = installed_shaders - server_shader_names
+                for shader_to_remove in shaders_to_remove:
+                    shader_path_to_remove = os.path.join(shaders_dir, shader_to_remove)
+                    try:
+                        if os.path.exists(shader_path_to_remove):
+                            os.remove(shader_path_to_remove)
+                            print(f"[INFO] Shader eliminado (ya no está en el servidor): {shader_to_remove}")
+                            self.add_message(tr("shader_removed", name=shader_to_remove))
+                    except Exception as e:
+                        print(f"[WARN] Error eliminando shader {shader_to_remove}: {e}")
             
             # Comparar y actualizar resource packs
             server_rps = server_profile.get("resourcepacks", [])
@@ -5242,6 +5268,8 @@ class LauncherWindow(QMainWindow):
                 base_url = profiles_data.get("server_url", f"http://{hostname}:25080")
                 if not base_url.startswith("http"):
                     base_url = f"http://{base_url}"
+                
+                server_rp_names = {rp.get("name") for rp in server_rps}
                 
                 for rp in server_rps:
                     rp_name = rp.get("name")
@@ -5266,6 +5294,18 @@ class LauncherWindow(QMainWindow):
                             print(f"[INFO] Resource pack descargado: {rp_name}")
                         except Exception as e:
                             print(f"[WARN] Error descargando resource pack {rp_name}: {e}")
+                
+                # Eliminar resource packs que ya no están en el servidor
+                rps_to_remove = installed_rps - server_rp_names
+                for rp_to_remove in rps_to_remove:
+                    rp_path_to_remove = os.path.join(rp_dir, rp_to_remove)
+                    try:
+                        if os.path.exists(rp_path_to_remove):
+                            os.remove(rp_path_to_remove)
+                            print(f"[INFO] Resource pack eliminado (ya no está en el servidor): {rp_to_remove}")
+                            self.add_message(tr("resourcepack_removed", name=rp_to_remove))
+                    except Exception as e:
+                        print(f"[WARN] Error eliminando resource pack {rp_to_remove}: {e}")
             
             # Actualizar options.txt si las opciones han cambiado
             server_options = server_profile.get("options", {})

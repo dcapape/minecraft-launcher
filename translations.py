@@ -234,6 +234,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "minecraft_started_success": "✓ Proceso de Minecraft iniciado correctamente",
         "game_should_open_soon": "El juego debería abrirse en breve...",
         "no_java_installations": "No se encontraron instalaciones de Java",
+        "mod_removed": "Mod eliminado (ya no está en el servidor): {name}",
+        "shader_removed": "Shader eliminado (ya no está en el servidor): {name}",
+        "resourcepack_removed": "Resource pack eliminado (ya no está en el servidor): {name}",
     },
     "en": {
         # General
@@ -457,6 +460,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "minecraft_started_success": "✓ Minecraft process started successfully",
         "game_should_open_soon": "The game should open shortly...",
         "no_java_installations": "No Java installations found",
+        "mod_removed": "Mod removed (no longer on server): {name}",
+        "shader_removed": "Shader removed (no longer on server): {name}",
+        "resourcepack_removed": "Resource pack removed (no longer on server): {name}",
     }
 }
 
