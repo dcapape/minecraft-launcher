@@ -51,7 +51,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "loading_versions": "Cargando versiones disponibles...",
         "stable_only": "Solo versiones estables",
         "all_versions_downloaded": "Todas las versiones {type} ya están {status}",
-        "versions_available_count": "{count} versiones {type} disponibles",
+        "versions_available_count": "{count} {type} versiones",
         "select_version": "Por favor selecciona una versión",
         "invalid_version": "Versión inválida",
         "error_determining_minecraft_path": "No se pudo determinar la ruta de Minecraft",
@@ -125,7 +125,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "authentication_error": "Error en la autenticación",
         "java_not_found": "No se encontró Java instalado",
         "java_required_version": "Se requiere Java {version} o superior",
-        "minecraft_not_detected": "Minecraft no detectado",
+        "minecraft_detected": "✓ Minecraft detectado",
+        "minecraft_not_detected": "✗ Minecraft no detectado",
         "version_not_found": "No se encontró la versión {version}",
         
         # Menu items

@@ -3863,10 +3863,6 @@ class LauncherWindow(QMainWindow):
         java_container.addLayout(java_layout)
         
         # Label para mostrar la versión de Java requerida (debajo del dropdown)
-        self.java_required_label = QLabel("")
-        self.java_required_label.setStyleSheet("color: blue; font-style: italic;")
-        self.java_required_label.setContentsMargins(0, 0, 0, 0)
-        java_container.addWidget(self.java_required_label)
         
         layout.addLayout(java_container)
         
@@ -3906,11 +3902,11 @@ class LauncherWindow(QMainWindow):
     def check_minecraft_status(self):
         """Verifica si Minecraft está instalado"""
         if self.minecraft_launcher.check_minecraft_installed():
-            self.minecraft_status.setText("✓ Minecraft detectado")
-            self.minecraft_status.setStyleSheet("color: green;")
-        else:
-            self.minecraft_status.setText("✗ Minecraft no detectado")
-            self.minecraft_status.setStyleSheet("color: red;")
+        self.minecraft_status.setText(tr("minecraft_detected"))
+        self.minecraft_status.setStyleSheet("color: green;")
+    else:
+        self.minecraft_status.setText(tr("minecraft_not_detected"))
+        self.minecraft_status.setStyleSheet("color: red;")
     
     def load_versions_async(self, select_version=None):
         """Inicia la carga asíncrona de versiones de Minecraft"""
@@ -4577,7 +4573,6 @@ class LauncherWindow(QMainWindow):
         ]
         
         if version_name in invalid_values:
-            self.java_required_label.setText("")
             return
         
         # Obtener el ID real de la versión (sin prefijos)
@@ -4587,7 +4582,6 @@ class LauncherWindow(QMainWindow):
             version_id = version_name
         
         if not version_id or version_id in invalid_values:
-            self.java_required_label.setText("")
             return
         
         # Detectar si es un perfil custom
@@ -4630,14 +4624,12 @@ class LauncherWindow(QMainWindow):
         if version_json:
             required_java = self.minecraft_launcher.get_required_java_version(version_json)
             if required_java:
-                self.java_required_label.setText(f"Requiere Java {required_java} o superior")
-                
                 # Intentar seleccionar automáticamente la versión de Java adecuada
                 self._auto_select_java(required_java)
             else:
-                self.java_required_label.setText("Requisitos de Java no especificados")
+                pass  # Requisitos de Java no especificados
         else:
-            self.java_required_label.setText("")
+            pass
     
     def _auto_select_java(self, required_version: int):
         """Selecciona automáticamente la versión de Java adecuada"""
@@ -4664,10 +4656,8 @@ class LauncherWindow(QMainWindow):
         else:
             # No hay versión adecuada, mostrar advertencia
             available_versions = sorted(java_installations.keys())
-            self.java_required_label.setText(
-                f"⚠ Requiere Java {required_version}+ (disponibles: {', '.join(map(str, available_versions))})"
-            )
-            self.java_required_label.setStyleSheet("color: orange; font-style: italic;")
+            # Java requerida pero no disponible - se maneja automáticamente
+            pass
     
     def add_message(self, message: str):
         """Añade un mensaje al área de mensajes"""
