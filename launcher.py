@@ -3900,11 +3900,11 @@ class LauncherWindow(QMainWindow):
     def check_minecraft_status(self):
         """Verifica si Minecraft está instalado"""
         if self.minecraft_launcher.check_minecraft_installed():
-        self.minecraft_status.setText(tr("minecraft_detected"))
-        self.minecraft_status.setStyleSheet("color: green;")
-    else:
-        self.minecraft_status.setText(tr("minecraft_not_detected"))
-        self.minecraft_status.setStyleSheet("color: red;")
+            self.minecraft_status.setText(tr("minecraft_detected"))
+            self.minecraft_status.setStyleSheet("color: green;")
+        else:
+            self.minecraft_status.setText(tr("minecraft_not_detected"))
+            self.minecraft_status.setStyleSheet("color: red;")
     
     def load_versions_async(self, select_version=None):
         """Inicia la carga asíncrona de versiones de Minecraft"""
