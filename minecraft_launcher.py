@@ -267,7 +267,7 @@ class MinecraftLauncher:
         
         return None
     
-    def launch_minecraft(self, credentials: Dict, version: str = "latest", java_path: Optional[str] = None, game_dir: Optional[str] = None) -> Tuple[bool, Optional[int]]:
+    def launch_minecraft(self, credentials: Dict, version: str = "latest", java_path: Optional[str] = None, game_dir: Optional[str] = None, message_callback: Optional[Callable[[str], None]] = None) -> Tuple[bool, Optional[int]]:
         """
         Lanza Minecraft con las credenciales proporcionadas
         
@@ -341,17 +341,37 @@ class MinecraftLauncher:
             # Verificar y descargar assets si es necesario
             # Los assets siempre van al directorio global, no al perfil
             assets_dir = os.path.join(self.minecraft_path, "assets")
-            asset_downloader = AssetDownloader(assets_dir)
+            
+            # Crear callback para mostrar mensajes de progreso de assets
+            def asset_progress_callback(progress, total, message):
+                """Callback para mostrar progreso de descarga de assets"""
+                if message_callback:
+                    # Extraer información útil del mensaje
+                    if "Descargando assets" in message:
+                        # Formato: "Descargando assets (123/456): nombre_asset"
+                        message_callback(message)
+                    elif "Assets descargados" in message:
+                        message_callback(message)
+                    elif "Descargando índice" in message:
+                        message_callback(message)
+            
+            asset_downloader = AssetDownloader(assets_dir, progress_callback=asset_progress_callback)
             
             # Verificar si los assets están completos
             valid_assets, total_assets = asset_downloader.verify_assets(version_json)
             
             if valid_assets < total_assets:
+                if message_callback:
+                    message_callback(f"Assets incompletos ({valid_assets}/{total_assets}), descargando...")
                 print(f"[INFO] Assets incompletos ({valid_assets}/{total_assets}), descargando...")
                 downloaded, total = asset_downloader.download_assets(version_json)
                 if downloaded > 0:
+                    if message_callback:
+                        message_callback(f"{downloaded} assets descargados correctamente")
                     print(f"[INFO] {downloaded} assets descargados")
                 elif valid_assets == 0:
+                    if message_callback:
+                        message_callback("Advertencia: No se pudieron descargar los assets, el juego puede no funcionar correctamente")
                     print(f"[WARN] No se pudieron descargar los assets, el juego puede no funcionar correctamente")
             
             # Obtener argumentos JVM y del juego
@@ -827,10 +847,6 @@ class MinecraftLauncher:
             
             final_args_before_main = args[1:final_main_class_index]
             
-            print(f"[DEBUG] Orden de argumentos final (verificado):")
-            print(f"  1. Java: {java_exe}")
-            print(f"  2. JVM args ({len(final_args_before_main)} args): {final_args_before_main}")
-            
             # Verificar si hay -cp en los argumentos
             cp_index = None
             for i, arg in enumerate(args):
@@ -841,9 +857,6 @@ class MinecraftLauncher:
             if cp_index is not None:
                 if cp_index + 1 < len(args):
                     cp_value = args[cp_index + 1]
-                    print(f"  [VERIFICACIÓN] -cp encontrado en índice {cp_index}")
-                    print(f"  [VERIFICACIÓN] Valor de classpath (completo): {str(cp_value)}")
-                    print(f"  [VERIFICACIÓN] Longitud del classpath: {len(str(cp_value))} caracteres")
                 else:
                     print(f"  [ERROR CRITICO] -cp encontrado en índice {cp_index} pero NO tiene valor después")
             elif not uses_module_path:
@@ -1607,11 +1620,9 @@ class MinecraftLauncher:
             True si se extrajo correctamente, False en caso contrario
         """
         try:
-            print(f"[INFO] Extrayendo nativos desde: {jar_path}")
             
             # Detectar arquitectura del sistema
             arch = self._get_system_architecture()
-            print(f"[DEBUG] Arquitectura detectada: {arch}")
             
             # Determinar extensión de archivos nativos según plataforma
             if self.system == "Windows":
@@ -1656,10 +1667,8 @@ class MinecraftLauncher:
                                     print(f"[WARN] Error extrayendo {filename}: {e}")
             
             if files_extracted > 0:
-                print(f"[INFO] Nativos extraídos correctamente ({files_extracted} archivos de arquitectura {arch})")
                 return True
             else:
-                print(f"[WARN] No se encontraron archivos nativos para arquitectura {arch} en {jar_path}")
                 # Intentar buscar en otras arquitecturas como fallback
                 print(f"[DEBUG] Buscando en otras arquitecturas como fallback...")
                 with zipfile.ZipFile(jar_path, 'r') as z:
@@ -1682,7 +1691,6 @@ class MinecraftLauncher:
                                         print(f"[WARN] Error extrayendo {filename}: {e}")
                 
                 if files_extracted > 0:
-                    print(f"[INFO] Nativos extraídos (fallback): {files_extracted} archivos")
                     return True
                 else:
                     print(f"[WARN] No se encontraron archivos nativos en {jar_path}")

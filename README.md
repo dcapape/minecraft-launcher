@@ -27,6 +27,9 @@ A custom launcher for Minecraft Java Edition that maintains user credentials for
 - ✅ **Profile update checking** - Automatically checks for updates (mods, shaders, resource packs) when launching custom profiles
 - ✅ **Improved application loading** - UI appears immediately, data loads progressively in background
 - ✅ **Purple-themed UI** - Consistent purple color scheme throughout the interface
+- ✅ **NeoForge version installation** - Install NeoForge versions directly from Maven repository
+- ✅ **Asset download notifications** - Real-time messages when downloading Minecraft assets
+- ✅ **Auto-scrolling message area** - Message area automatically scrolls to show latest messages
 
 ## Requirements
 
@@ -327,6 +330,22 @@ The launcher properly handles version inheritance by:
 - Extracted to unique temporary directory: `.minecraft/bin/<HASH>/`
 - Only architecture-specific files are extracted (e.g., `windows/x64/`)
 - Files are placed directly in the root of the hash directory (no nested structure)
+
+## New Features in v1.1.2
+
+- **NeoForge Version Installation**:
+  - Install NeoForge versions directly from the Maven repository
+  - Browse and select from all available NeoForge versions
+  - Shows Minecraft version compatibility for each NeoForge version
+  - Automatically installs required vanilla Minecraft version if missing
+  - Downloads and installs all necessary libraries automatically
+- **Asset Download Notifications**:
+  - Real-time messages in the launcher window when downloading Minecraft assets
+  - Shows progress information during asset downloads
+  - Better visibility into what the launcher is doing
+- **Auto-scrolling Message Area**:
+  - Message area automatically scrolls to show the latest messages
+  - No need to manually scroll to see new updates
 
 ## New Features in v1.1.1
 

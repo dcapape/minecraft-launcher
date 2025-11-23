@@ -72,11 +72,16 @@ class LaunchMinecraftThread(QThread):
     def run(self):
         try:
             self.message.emit("Iniciando proceso de Minecraft...")
+            # Crear callback para pasar mensajes al signal
+            def message_callback(msg):
+                self.message.emit(msg)
+            
             success, detected_java_version = self.minecraft_launcher.launch_minecraft(
                 self.credentials, 
                 self.version, 
                 self.java_path, 
-                game_dir=self.game_dir
+                game_dir=self.game_dir,
+                message_callback=message_callback
             )
             self.finished.emit(success, detected_java_version)
         except Exception as e:
@@ -123,6 +128,21 @@ class LoadVersionManifestThread(QThread):
             response.raise_for_status()
             manifest = response.json()
             self.finished.emit(manifest)
+        except Exception as e:
+            self.error.emit(str(e))
+
+class LoadNeoForgeVersionsThread(QThread):
+    """Thread para cargar versiones de NeoForge desde Maven"""
+    finished = pyqtSignal(list)  # lista de versiones
+    error = pyqtSignal(str)
+    
+    def run(self):
+        try:
+            response = requests.get("https://maven.neoforged.net/api/maven/versions/releases/net%2Fneoforged%2Fneoforge", timeout=30)
+            response.raise_for_status()
+            data = response.json()
+            versions = data.get("versions", [])
+            self.finished.emit(versions)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -672,17 +692,316 @@ class RedirectUrlDialog(QDialog):
     def get_redirect_url(self):
         return self.redirect_url
 
+class DownloadNeoForgeThread(QThread):
+    """Thread para descargar e instalar una versión de NeoForge"""
+    progress = pyqtSignal(int, int, str)  # descargado, total, mensaje
+    finished = pyqtSignal(str)  # version_id
+    error = pyqtSignal(str)
+    
+    def __init__(self, neoforge_version, minecraft_path):
+        super().__init__()
+        self.neoforge_version = neoforge_version
+        self.minecraft_path = minecraft_path
+        self.system = platform.system()
+    
+    def _extract_minecraft_version(self, neoforge_version):
+        """Extrae la versión de Minecraft desde la versión de NeoForge
+        Ejemplo: 21.10.55-beta -> 1.21.10
+        Ejemplo: 21.1.215 -> 1.21.1
+        """
+        # Remover sufijos como -beta, -alpha, etc.
+        version_part = neoforge_version.split('-')[0]
+        parts = version_part.split('.')
+        
+        if len(parts) >= 2:
+            major = parts[0]
+            minor = parts[1]
+            return f"1.{major}.{minor}"
+        return None
+    
+    def _find_java(self):
+        """Encuentra Java para ejecutar el instalador"""
+        from java_downloader import JavaDownloader
+        java_downloader = JavaDownloader(self.minecraft_path)
+        
+        # Construir ruta directamente para Java 21 (NeoForge requiere Java 21+)
+        runtime_dir = os.path.join(self.minecraft_path, "runtime", "java-runtime-21")
+        java_exe = os.path.join(runtime_dir, "bin", "java.exe" if self.system == "Windows" else "java")
+        
+        if os.path.exists(java_exe):
+            return java_exe
+        
+        # Si no existe, intentar descargar Java 21
+        java_path = java_downloader.download_java(21)
+        if java_path:
+            return java_path
+        
+        # Si falla, intentar con Java 17
+        runtime_dir = os.path.join(self.minecraft_path, "runtime", "java-runtime-17")
+        java_exe = os.path.join(runtime_dir, "bin", "java.exe" if self.system == "Windows" else "java")
+        
+        if os.path.exists(java_exe):
+            return java_exe
+        
+        # Intentar descargar Java 17
+        java_path = java_downloader.download_java(17)
+        if java_path:
+            return java_path
+        
+        # Fallback: buscar en PATH
+        creationflags = subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0
+        java_names = ["java", "javaw"] if self.system == "Windows" else ["java"]
+        for java_name in java_names:
+            try:
+                result = subprocess.run(
+                    [java_name, "-version"],
+                    capture_output=True,
+                    timeout=5,
+                    creationflags=creationflags
+                )
+                if result.returncode == 0 or result.returncode == 1:
+                    return java_name
+            except:
+                continue
+        
+        return None
+    
+    def run(self):
+        try:
+            minecraft_version = self._extract_minecraft_version(self.neoforge_version)
+            if not minecraft_version:
+                self.error.emit(f"No se pudo determinar la versión de Minecraft para NeoForge {self.neoforge_version}")
+                return
+            
+            self.progress.emit(5, 100, f"Instalando versión Vanilla {minecraft_version}...")
+            
+            # Primero instalar la versión vanilla base
+            from minecraft_launcher import MinecraftLauncher
+            launcher = MinecraftLauncher()
+            
+            # Verificar si la versión vanilla está instalada
+            # Usar el minecraft_path que se pasó al thread, no el detectado por launcher
+            available_versions = []
+            versions_dir = os.path.join(self.minecraft_path, "versions")
+            if os.path.exists(versions_dir):
+                for version_folder in os.listdir(versions_dir):
+                    version_path = os.path.join(versions_dir, version_folder)
+                    if os.path.isdir(version_path):
+                        json_path = os.path.join(version_path, f"{version_folder}.json")
+                        if os.path.exists(json_path):
+                            available_versions.append(version_folder)
+            if minecraft_version not in available_versions:
+                # Descargar la versión vanilla primero
+                self.progress.emit(10, 100, f"Descargando versión Vanilla {minecraft_version}...")
+                # Obtener el manifest y la URL de la versión
+                manifest_response = requests.get("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json", timeout=30)
+                manifest_response.raise_for_status()
+                manifest = manifest_response.json()
+                
+                version_info = None
+                for version in manifest.get("versions", []):
+                    if version.get("id") == minecraft_version:
+                        version_info = version
+                        break
+                
+                if not version_info:
+                    self.error.emit(f"No se encontró la versión Vanilla {minecraft_version}")
+                    return
+                
+                version_url = version_info.get("url")
+                if not version_url:
+                    self.error.emit(f"No se encontró URL para la versión {minecraft_version}")
+                    return
+                
+                # Descargar el JSON de la versión
+                version_response = requests.get(version_url, timeout=30)
+                version_response.raise_for_status()
+                version_json = version_response.json()
+                
+                # Crear directorio de la versión
+                version_dir = os.path.join(self.minecraft_path, "versions", minecraft_version)
+                os.makedirs(version_dir, exist_ok=True)
+                
+                # Guardar JSON
+                json_path = os.path.join(version_dir, f"{minecraft_version}.json")
+                with open(json_path, 'w', encoding='utf-8') as f:
+                    json.dump(version_json, f, indent=2)
+                
+                # Descargar cliente JAR
+                client_jar_url = version_json.get("downloads", {}).get("client", {}).get("url")
+                if client_jar_url:
+                    self.progress.emit(20, 100, f"Descargando cliente JAR...")
+                    client_jar_path = os.path.join(version_dir, f"{minecraft_version}.jar")
+                    jar_response = requests.get(client_jar_url, stream=True, timeout=60)
+                    jar_response.raise_for_status()
+                    
+                    with open(client_jar_path, 'wb') as f:
+                        for chunk in jar_response.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+                
+                # Descargar librerías básicas (solo las más importantes para que el instalador funcione)
+                self.progress.emit(30, 100, "Descargando librerías básicas...")
+                libraries = version_json.get("libraries", [])
+                libraries_dir = os.path.join(self.minecraft_path, "libraries")
+                
+                # Descargar solo algunas librerías críticas (esto se puede optimizar)
+                for i, library in enumerate(libraries[:10]):  # Limitar a 10 para no tardar mucho
+                    if "downloads" in library and "artifact" in library["downloads"]:
+                        artifact = library["downloads"]["artifact"]
+                        lib_url = artifact.get("url")
+                        lib_path = artifact.get("path")
+                        
+                        if lib_url and lib_path:
+                            full_path = os.path.join(libraries_dir, lib_path)
+                            if not os.path.exists(full_path):
+                                os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                                lib_response = requests.get(lib_url, stream=True, timeout=30)
+                                lib_response.raise_for_status()
+                                with open(full_path, 'wb') as f:
+                                    for chunk in lib_response.iter_content(chunk_size=8192):
+                                        if chunk:
+                                            f.write(chunk)
+            
+            # Ahora instalar NeoForge
+            self.progress.emit(40, 100, f"Descargando instalador de NeoForge {self.neoforge_version}...")
+            
+            installer_url = f"https://maven.neoforged.net/releases/net/neoforged/neoforge/{self.neoforge_version}/neoforge-{self.neoforge_version}-installer.jar"
+            
+            # Crear directorio temporal para el instalador
+            temp_dir = os.path.join(self.minecraft_path, "temp")
+            os.makedirs(temp_dir, exist_ok=True)
+            installer_path = os.path.join(temp_dir, f"neoforge-{self.neoforge_version}-installer.jar")
+            
+            # Descargar instalador
+            installer_response = requests.get(installer_url, stream=True, timeout=60)
+            installer_response.raise_for_status()
+            
+            with open(installer_path, 'wb') as f:
+                for chunk in installer_response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+            
+            # Ejecutar instalador
+            self.progress.emit(60, 100, "Ejecutando instalador de NeoForge...")
+            
+            java_path = self._find_java()
+            if not java_path:
+                self.error.emit("No se encontró Java para ejecutar el instalador")
+                return
+            
+            minecraft_path_abs = os.path.abspath(self.minecraft_path)
+            cmd = [
+                java_path, "-jar", installer_path,
+                "--installClient", minecraft_path_abs
+            ]
+            
+            env = os.environ.copy()
+            env["MINECRAFT_DIR"] = minecraft_path_abs
+            env["INSTALL_DIR"] = minecraft_path_abs
+            env["MCP_DIR"] = minecraft_path_abs
+            
+            result = subprocess.run(
+                cmd,
+                cwd=minecraft_path_abs,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=300,
+                creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0
+            )
+            
+            if result.returncode != 0:
+                error_msg = result.stderr if result.stderr else result.stdout if result.stdout else "Error desconocido"
+                self.error.emit(f"Error ejecutando instalador de NeoForge: {error_msg}")
+                return
+            
+            # Determinar el ID de versión instalado (normalmente es neoforge-{version})
+            expected_version_id = f"neoforge-{self.neoforge_version}"
+            
+            # Verificar que se instaló correctamente
+            self.progress.emit(70, 100, "Verificando instalación...")
+            version_json_path = os.path.join(self.minecraft_path, "versions", expected_version_id, f"{expected_version_id}.json")
+            if not os.path.exists(version_json_path):
+                self.error.emit(f"El instalador no instaló la versión correctamente. Buscado en: {version_json_path}")
+                return
+            
+            # Verificar que el JAR cliente existe en libraries y copiarlo a versions si no existe
+            self.progress.emit(80, 100, "Verificando JAR cliente...")
+            client_jar_path = os.path.join(
+                self.minecraft_path, 
+                "libraries", 
+                "net", 
+                "neoforged", 
+                "neoforge", 
+                self.neoforge_version,
+                f"neoforge-{self.neoforge_version}-client.jar"
+            )
+            
+            target_version_dir = os.path.join(self.minecraft_path, "versions", expected_version_id)
+            target_jar = os.path.join(target_version_dir, f"{expected_version_id}.jar")
+            
+            # Si el JAR no existe en versions, copiarlo desde libraries
+            import shutil
+            import glob
+            
+            if not os.path.exists(target_jar):
+                if os.path.exists(client_jar_path):
+                    os.makedirs(target_version_dir, exist_ok=True)
+                    shutil.copy2(client_jar_path, target_jar)
+                    print(f"[INFO] JAR cliente copiado a versiones: {target_jar}")
+                else:
+                    # Si no existe en libraries, el instalador puede haberlo colocado en otro lugar
+                    # Buscar en libraries recursivamente
+                    search_pattern = os.path.join(
+                        self.minecraft_path,
+                        "libraries",
+                        "net",
+                        "neoforged",
+                        "neoforge",
+                        self.neoforge_version,
+                        "*.jar"
+                    )
+                    found_jars = glob.glob(search_pattern)
+                    if found_jars:
+                        # Usar el primer JAR encontrado que contenga "client" o el más grande
+                        client_jar = None
+                        for jar in found_jars:
+                            if "client" in os.path.basename(jar).lower():
+                                client_jar = jar
+                                break
+                        if not client_jar:
+                            # Si no hay uno con "client", usar el más grande (probablemente el cliente)
+                            client_jar = max(found_jars, key=os.path.getsize)
+                        
+                        os.makedirs(target_version_dir, exist_ok=True)
+                        shutil.copy2(client_jar, target_jar)
+                        print(f"[INFO] JAR cliente encontrado y copiado: {target_jar}")
+                    else:
+                        print(f"[WARN] No se encontró el JAR cliente de NeoForge. Puede que las librerías no estén completamente descargadas.")
+                        # Continuar de todas formas, el JAR se descargará cuando se lance el juego
+            
+            self.progress.emit(100, 100, f"NeoForge {self.neoforge_version} instalado correctamente")
+            self.finished.emit(expected_version_id)
+            
+        except Exception as e:
+            import traceback
+            error_msg = f"Error instalando NeoForge: {str(e)}\n{traceback.format_exc()}"
+            self.error.emit(error_msg)
+
 class VersionDownloadDialog(QDialog):
     """Diálogo para seleccionar y descargar versiones de Minecraft"""
     
-    def __init__(self, parent=None, minecraft_launcher=None):
+    def __init__(self, parent=None, minecraft_launcher=None, version_type="vanilla"):
         super().__init__(parent)
         self.minecraft_launcher = minecraft_launcher
+        self.version_type = version_type  # "vanilla" o "neoforge"
         self.selected_version = None
         self.manifest_thread = None
         self.download_thread = None
         
-        self.setWindowTitle("Añadir Versión")
+        title = "Añadir Versión de NeoForge" if version_type == "neoforge" else "Añadir Versión de Minecraft"
+        self.setWindowTitle(title)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.resize(600, 500)
@@ -705,7 +1024,8 @@ class VersionDownloadDialog(QDialog):
         title_bar_layout.setSpacing(5)
         title_bar.setLayout(title_bar_layout)
         
-        title = QLabel("Añadir Versión de Minecraft")
+        title_text = "Añadir Versión de NeoForge" if version_type == "neoforge" else "Añadir Versión de Minecraft"
+        title = QLabel(title_text)
         title.setObjectName("titleLabel")
         title.setAlignment(Qt.AlignCenter)
         title_bar_layout.addWidget(title, 1)
@@ -736,7 +1056,7 @@ class VersionDownloadDialog(QDialog):
         self.version_list.setFont(font)
         layout.addWidget(self.version_list)
         
-        # Checkbox para filtrar solo versiones estables
+        # Checkbox para filtrar solo versiones estables (solo para vanilla)
         self.stable_only_checkbox = QCheckBox("Solo versiones estables")
         self.stable_only_checkbox.setChecked(True)  # Marcado por defecto
         self.stable_only_checkbox.setStyleSheet("""
@@ -761,7 +1081,9 @@ class VersionDownloadDialog(QDialog):
             }
         """)
         self.stable_only_checkbox.stateChanged.connect(self.on_filter_changed)
-        layout.addWidget(self.stable_only_checkbox)
+        # Solo mostrar el checkbox para versiones vanilla
+        if version_type == "vanilla":
+            layout.addWidget(self.stable_only_checkbox)
         
         # Guardar el manifest completo para poder filtrar
         self.full_manifest = None
@@ -895,8 +1217,11 @@ class VersionDownloadDialog(QDialog):
             }
         """)
         
-        # Cargar manifest
-        self.load_manifest()
+        # Cargar manifest o versiones de NeoForge
+        if self.version_type == "neoforge":
+            self.load_neoforge_versions()
+        else:
+            self.load_manifest()
     
     def _center_on_parent_screen(self, parent):
         """Centra la ventana en la pantalla donde está la ventana principal"""
@@ -920,6 +1245,91 @@ class VersionDownloadDialog(QDialog):
         self.manifest_thread.finished.connect(self.on_manifest_loaded)
         self.manifest_thread.error.connect(self.on_manifest_error)
         self.manifest_thread.start()
+    
+    def load_neoforge_versions(self):
+        """Carga las versiones de NeoForge desde Maven"""
+        self.manifest_thread = LoadNeoForgeVersionsThread()
+        self.manifest_thread.finished.connect(self.on_neoforge_versions_loaded)
+        self.manifest_thread.error.connect(self.on_manifest_error)
+        self.manifest_thread.start()
+    
+    def _extract_minecraft_version(self, neoforge_version):
+        """Extrae la versión de Minecraft desde la versión de NeoForge
+        Ejemplo: 21.10.55-beta -> 1.21.10
+        Ejemplo: 21.1.215 -> 1.21.1
+        """
+        # Remover sufijos como -beta, -alpha, etc.
+        version_part = neoforge_version.split('-')[0]
+        parts = version_part.split('.')
+        
+        if len(parts) >= 2:
+            major = parts[0]
+            minor = parts[1]
+            return f"1.{major}.{minor}"
+        return "?"
+    
+    def on_neoforge_versions_loaded(self, versions):
+        """Se llama cuando se cargan las versiones de NeoForge"""
+        if not versions:
+            self.status_label.setText("No se encontraron versiones de NeoForge")
+            self.status_label.setStyleSheet("color: #fca5a5;")
+            self.version_list.clear()
+            self.version_list.setEnabled(False)
+            self.download_button.setEnabled(False)
+            return
+        
+        # Obtener versiones ya instaladas
+        installed_versions = set()
+        if self.minecraft_launcher:
+            try:
+                installed = self.minecraft_launcher.get_available_versions(only_downloaded=True)
+                # Filtrar solo versiones de NeoForge
+                for v in installed:
+                    if v.startswith("neoforge-"):
+                        # Extraer versión de neoforge-{version}
+                        neoforge_ver = v.replace("neoforge-", "")
+                        installed_versions.add(neoforge_ver)
+            except:
+                pass
+        
+        # Filtrar versiones no instaladas
+        available_versions = []
+        for version in versions:
+            if version not in installed_versions:
+                available_versions.append(version)
+        
+        if not available_versions:
+            self.status_label.setText("Todas las versiones de NeoForge ya están instaladas")
+            self.status_label.setStyleSheet("color: #fca5a5;")
+            self.version_list.clear()
+            self.version_list.setEnabled(False)
+            self.download_button.setEnabled(False)
+            return
+        
+        # Ordenar versiones (más recientes primero - orden inverso)
+        # Convertir a tuplas (major, minor, patch) para ordenar correctamente
+        def version_key(v):
+            # Remover sufijos
+            version_part = v.split('-')[0]
+            parts = version_part.split('.')
+            # Convertir a enteros, rellenar con 0 si faltan
+            return tuple(int(p) if p.isdigit() else 0 for p in parts[:3])
+        
+        available_versions.sort(key=version_key, reverse=True)
+        
+        # Agregar a la lista
+        self.version_list.clear()
+        for version in available_versions:
+            minecraft_version = self._extract_minecraft_version(version)
+            display_name = f"{version} ({minecraft_version})"
+            item = QListWidgetItem(display_name)
+            item.setData(Qt.UserRole, version)  # Guardar solo la versión como string
+            self.version_list.addItem(item)
+        
+        self.version_list.setEnabled(True)
+        self.download_button.setEnabled(True)
+        self.status_label.setText(f"{len(available_versions)} versiones de NeoForge disponibles")
+        self.status_label.setStyleSheet("color: #86efac;")
     
     def on_manifest_loaded(self, manifest):
         """Se llama cuando se carga el manifest"""
@@ -1008,15 +1418,6 @@ class VersionDownloadDialog(QDialog):
         if not version_data:
             return
         
-        version_id = version_data.get("id")
-        version_url = version_data.get("url")
-        
-        if not version_id or not version_url:
-            QMessageBox.warning(self, "Error", "Versión inválida")
-            return
-        
-        print(f"[INFO] Iniciando descarga de versión: {version_id}")
-        
         # Iniciar descarga ANTES de cerrar el diálogo
         minecraft_path = self.minecraft_launcher.minecraft_path if self.minecraft_launcher else None
         if not minecraft_path:
@@ -1029,38 +1430,85 @@ class VersionDownloadDialog(QDialog):
             QMessageBox.warning(self, "Error", "No se pudo obtener la ventana principal")
             return
         
-        # Crear el thread con el parent como padre para que no se destruya
-        self.download_thread = DownloadVersionThread(version_id, version_url, minecraft_path)
-        self.download_thread.setParent(parent)  # Establecer parent para que no se destruya
-        
-        # Conectar señales al parent (LauncherWindow) en lugar del diálogo
-        print(f"[INFO] Conectando señales del thread al parent")
-        self.download_thread.progress.connect(parent.on_version_download_progress)
-        self.download_thread.finished.connect(parent.on_version_download_finished)
-        self.download_thread.error.connect(parent.on_version_download_error)
-        
-        # Guardar referencia en el parent para que no se destruya
-        if hasattr(parent, 'version_download_thread'):
-            # Si hay un thread anterior, esperar a que termine o cancelarlo
-            if parent.version_download_thread and parent.version_download_thread.isRunning():
-                print(f"[WARN] Thread de descarga anterior aún en ejecución")
-        parent.version_download_thread = self.download_thread
-        
-        # NO conectar deleteLater aquí - el thread debe mantenerse vivo hasta que termine completamente
-        # La limpieza se hará en los métodos on_version_download_finished/error después de verificar que terminó
-        
-        # Guardar referencia al diálogo en el parent para poder cerrarlo cuando termine
-        if parent and hasattr(parent, 'version_download_dialog'):
-            parent.version_download_dialog = self
-        
-        # Iniciar el thread
-        self.download_thread.start()
-        print(f"[INFO] Thread de descarga iniciado")
-        
-        # Cerrar el diálogo inmediatamente después de iniciar el thread
-        # El thread continuará ejecutándose en segundo plano y mostrará el progreso en la ventana principal
-        print(f"[INFO] Cerrando diálogo, thread continuará en segundo plano descargando librerías")
-        self.accept()
+        if self.version_type == "neoforge":
+            # Descargar e instalar NeoForge
+            neoforge_version = version_data  # Es un string, no un dict
+            if not neoforge_version:
+                QMessageBox.warning(self, "Error", "Versión de NeoForge inválida")
+                return
+            
+            print(f"[INFO] Iniciando instalación de NeoForge: {neoforge_version}")
+            
+            # Crear el thread con el parent como padre para que no se destruya
+            self.download_thread = DownloadNeoForgeThread(neoforge_version, minecraft_path)
+            self.download_thread.setParent(parent)
+            
+            # Conectar señales al parent (LauncherWindow)
+            print(f"[INFO] Conectando señales del thread de NeoForge al parent")
+            self.download_thread.progress.connect(parent.on_version_download_progress)
+            self.download_thread.finished.connect(parent.on_version_download_finished)
+            self.download_thread.error.connect(parent.on_version_download_error)
+            
+            # Guardar referencia en el parent
+            if hasattr(parent, 'version_download_thread'):
+                if parent.version_download_thread and parent.version_download_thread.isRunning():
+                    print(f"[WARN] Thread de descarga anterior aún en ejecución")
+            parent.version_download_thread = self.download_thread
+            
+            # Guardar referencia al diálogo
+            if parent and hasattr(parent, 'version_download_dialog'):
+                parent.version_download_dialog = self
+            
+            # Iniciar el thread
+            self.download_thread.start()
+            print(f"[INFO] Thread de instalación de NeoForge iniciado")
+            
+            # Cerrar el diálogo
+            print(f"[INFO] Cerrando diálogo, thread continuará en segundo plano instalando NeoForge")
+            self.accept()
+        else:
+            # Descargar versión vanilla (código original)
+            version_id = version_data.get("id")
+            version_url = version_data.get("url")
+            
+            if not version_id or not version_url:
+                QMessageBox.warning(self, "Error", "Versión inválida")
+                return
+            
+            print(f"[INFO] Iniciando descarga de versión: {version_id}")
+            
+            # Crear el thread con el parent como padre para que no se destruya
+            self.download_thread = DownloadVersionThread(version_id, version_url, minecraft_path)
+            self.download_thread.setParent(parent)  # Establecer parent para que no se destruya
+            
+            # Conectar señales al parent (LauncherWindow) en lugar del diálogo
+            print(f"[INFO] Conectando señales del thread al parent")
+            self.download_thread.progress.connect(parent.on_version_download_progress)
+            self.download_thread.finished.connect(parent.on_version_download_finished)
+            self.download_thread.error.connect(parent.on_version_download_error)
+            
+            # Guardar referencia en el parent para que no se destruya
+            if hasattr(parent, 'version_download_thread'):
+                # Si hay un thread anterior, esperar a que termine o cancelarlo
+                if parent.version_download_thread and parent.version_download_thread.isRunning():
+                    print(f"[WARN] Thread de descarga anterior aún en ejecución")
+            parent.version_download_thread = self.download_thread
+            
+            # NO conectar deleteLater aquí - el thread debe mantenerse vivo hasta que termine completamente
+            # La limpieza se hará en los métodos on_version_download_finished/error después de verificar que terminó
+            
+            # Guardar referencia al diálogo en el parent para poder cerrarlo cuando termine
+            if parent and hasattr(parent, 'version_download_dialog'):
+                parent.version_download_dialog = self
+            
+            # Iniciar el thread
+            self.download_thread.start()
+            print(f"[INFO] Thread de descarga iniciado")
+            
+            # Cerrar el diálogo inmediatamente después de iniciar el thread
+            # El thread continuará ejecutándose en segundo plano y mostrará el progreso en la ventana principal
+            print(f"[INFO] Cerrando diálogo, thread continuará en segundo plano descargando librerías")
+            self.accept()
     
     def on_download_progress(self, downloaded, total, message):
         """Actualiza el progreso de la descarga"""
@@ -3760,13 +4208,16 @@ class LauncherWindow(QMainWindow):
             self.version_download_dialog = None
     
     def show_neoforge_dialog(self):
-        """Muestra el diálogo para añadir una nueva versión NeoForge (placeholder)"""
-        # Por ahora no hace nada
-        QMessageBox.information(
-            self,
-            "NeoForge",
-            "La instalación de NeoForge estará disponible próximamente."
-        )
+        """Muestra el diálogo para añadir una nueva versión NeoForge"""
+        dialog = VersionDownloadDialog(self, self.minecraft_launcher, version_type="neoforge")
+        # Guardar referencia al diálogo
+        self.version_download_dialog = dialog
+        
+        result = dialog.exec_()
+        
+        # Limpiar referencia al diálogo
+        if self.version_download_dialog == dialog:
+            self.version_download_dialog = None
     
     def show_custom_profile_dialog(self):
         """Muestra el diálogo para añadir perfiles personalizados desde URL"""
@@ -4216,6 +4667,9 @@ class LauncherWindow(QMainWindow):
     def add_message(self, message: str):
         """Añade un mensaje al área de mensajes"""
         self.message_area.append(f"[{time.strftime('%H:%M:%S')}] {message}")
+        # Hacer que el scroll baje automáticamente a la última línea
+        scrollbar = self.message_area.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
     
     def _create_bg_loader(self):
         """Crea la función para cargar imágenes de fondo"""
