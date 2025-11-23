@@ -1398,7 +1398,8 @@ class VersionDownloadDialog(QDialog):
         self.version_list.setEnabled(True)
         self.download_button.setEnabled(True)
         filter_text = tr("stable_versions") if self.stable_only_checkbox.isChecked() else tr("available_versions")
-        self.status_label.setText(tr("versions_available", count=len(available_versions), type=filter_text))
+        # Usar la clave correcta para el diálogo de descarga de versiones
+        self.status_label.setText(tr("versions_available_count", count=len(available_versions), type=filter_text))
         self.status_label.setStyleSheet("color: #86efac;")
     
     def on_filter_changed(self, state):
