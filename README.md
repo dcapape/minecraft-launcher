@@ -2,6 +2,8 @@
 
 A custom launcher for Minecraft Java Edition that maintains user credentials for connecting to online servers.
 
+![Launcher Screenshot](assets/screenshot.png)
+
 ## Features
 
 - ✅ Microsoft/Mojang authentication

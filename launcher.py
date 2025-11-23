@@ -28,6 +28,10 @@ from credential_storage import CredentialStorage
 from minecraft_launcher import MinecraftLauncher
 from server_manager import ServerManagerDialog, fetch_profiles_json
 from asset_downloader import AssetDownloader
+from translations import tr, set_language, get_language, save_language_to_config, load_language_from_config, TRANSLATIONS
+
+# Inicializar el idioma al importar
+set_language(load_language_from_config())
 
 # Verificar que nbtlib esté instalado
 try:
@@ -1000,7 +1004,7 @@ class VersionDownloadDialog(QDialog):
         self.manifest_thread = None
         self.download_thread = None
         
-        title = "Añadir Versión de NeoForge" if version_type == "neoforge" else "Añadir Versión de Minecraft"
+        title = tr("add_neoforge_title") if version_type == "neoforge" else tr("add_version_title")
         self.setWindowTitle(title)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
         self.setAttribute(Qt.WA_TranslucentBackground)
@@ -1024,7 +1028,7 @@ class VersionDownloadDialog(QDialog):
         title_bar_layout.setSpacing(5)
         title_bar.setLayout(title_bar_layout)
         
-        title_text = "Añadir Versión de NeoForge" if version_type == "neoforge" else "Añadir Versión de Minecraft"
+        title_text = tr("add_neoforge_title") if version_type == "neoforge" else tr("add_version_title")
         title = QLabel(title_text)
         title.setObjectName("titleLabel")
         title.setAlignment(Qt.AlignCenter)
@@ -1043,7 +1047,7 @@ class VersionDownloadDialog(QDialog):
         layout.addWidget(title_bar)
         
         # Label de estado
-        self.status_label = QLabel("Cargando versiones disponibles...")
+        self.status_label = QLabel(tr("loading_versions"))
         self.status_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.status_label)
         
@@ -1057,7 +1061,7 @@ class VersionDownloadDialog(QDialog):
         layout.addWidget(self.version_list)
         
         # Checkbox para filtrar solo versiones estables (solo para vanilla)
-        self.stable_only_checkbox = QCheckBox("Solo versiones estables")
+        self.stable_only_checkbox = QCheckBox(tr("stable_only"))
         self.stable_only_checkbox.setChecked(True)  # Marcado por defecto
         self.stable_only_checkbox.setStyleSheet("""
             QCheckBox {
@@ -1092,11 +1096,11 @@ class VersionDownloadDialog(QDialog):
         button_layout = QHBoxLayout()
         button_layout.addStretch()
         
-        cancel_button = QPushButton("Cancelar")
+        cancel_button = QPushButton(tr("cancel"))
         cancel_button.clicked.connect(self.reject)
         button_layout.addWidget(cancel_button)
         
-        self.download_button = QPushButton("Descargar")
+        self.download_button = QPushButton(tr("download"))
         self.download_button.setEnabled(False)
         self.download_button.clicked.connect(self.start_download)
         button_layout.addWidget(self.download_button)
@@ -1271,7 +1275,7 @@ class VersionDownloadDialog(QDialog):
     def on_neoforge_versions_loaded(self, versions):
         """Se llama cuando se cargan las versiones de NeoForge"""
         if not versions:
-            self.status_label.setText("No se encontraron versiones de NeoForge")
+            self.status_label.setText(tr("no_neoforge_versions_found"))
             self.status_label.setStyleSheet("color: #fca5a5;")
             self.version_list.clear()
             self.version_list.setEnabled(False)
@@ -1299,7 +1303,7 @@ class VersionDownloadDialog(QDialog):
                 available_versions.append(version)
         
         if not available_versions:
-            self.status_label.setText("Todas las versiones de NeoForge ya están instaladas")
+            self.status_label.setText(tr("all_neoforge_versions_installed"))
             self.status_label.setStyleSheet("color: #fca5a5;")
             self.version_list.clear()
             self.version_list.setEnabled(False)
@@ -1328,7 +1332,7 @@ class VersionDownloadDialog(QDialog):
         
         self.version_list.setEnabled(True)
         self.download_button.setEnabled(True)
-        self.status_label.setText(f"{len(available_versions)} versiones de NeoForge disponibles")
+        self.status_label.setText(tr("neoforge_versions_available", count=len(available_versions)))
         self.status_label.setStyleSheet("color: #86efac;")
     
     def on_manifest_loaded(self, manifest):
@@ -1370,8 +1374,8 @@ class VersionDownloadDialog(QDialog):
                     available_versions.append(version)
         
         if not available_versions:
-            filter_text = "estables" if self.stable_only_checkbox.isChecked() else "disponibles"
-            self.status_label.setText(f"Todas las versiones {filter_text} ya están descargadas")
+            filter_text = tr("stable_versions") if self.stable_only_checkbox.isChecked() else tr("available_versions")
+            self.status_label.setText(tr("all_versions_downloaded", type=filter_text))
             self.status_label.setStyleSheet("color: #fca5a5;")
             self.version_list.clear()
             self.version_list.setEnabled(False)
@@ -1393,8 +1397,8 @@ class VersionDownloadDialog(QDialog):
         
         self.version_list.setEnabled(True)
         self.download_button.setEnabled(True)
-        filter_text = "estables" if self.stable_only_checkbox.isChecked() else "disponibles"
-        self.status_label.setText(f"{len(available_versions)} versiones {filter_text}")
+        filter_text = tr("stable_versions") if self.stable_only_checkbox.isChecked() else tr("available_versions")
+        self.status_label.setText(tr("versions_available", count=len(available_versions), type=filter_text))
         self.status_label.setStyleSheet("color: #86efac;")
     
     def on_filter_changed(self, state):
@@ -1404,14 +1408,14 @@ class VersionDownloadDialog(QDialog):
     
     def on_manifest_error(self, error):
         """Se llama cuando hay un error cargando el manifest"""
-        self.status_label.setText(f"Error cargando versiones: {error}")
+        self.status_label.setText(tr("error_loading_versions", error=error))
         self.status_label.setStyleSheet("color: #fca5a5;")
     
     def start_download(self):
         """Inicia la descarga de la versión seleccionada"""
         current_item = self.version_list.currentItem()
         if not current_item:
-            QMessageBox.warning(self, "Error", "Por favor selecciona una versión")
+            QMessageBox.warning(self, tr("error"), tr("please_select_version"))
             return
         
         version_data = current_item.data(Qt.UserRole)
@@ -1421,20 +1425,20 @@ class VersionDownloadDialog(QDialog):
         # Iniciar descarga ANTES de cerrar el diálogo
         minecraft_path = self.minecraft_launcher.minecraft_path if self.minecraft_launcher else None
         if not minecraft_path:
-            QMessageBox.warning(self, "Error", "No se pudo determinar la ruta de Minecraft")
+            QMessageBox.warning(self, tr("error"), tr("could_not_determine_minecraft_path"))
             return
         
         # Crear el thread ANTES de cerrar el diálogo
         parent = self.parent()
         if not parent:
-            QMessageBox.warning(self, "Error", "No se pudo obtener la ventana principal")
+            QMessageBox.warning(self, tr("error"), tr("could_not_get_main_window"))
             return
         
         if self.version_type == "neoforge":
             # Descargar e instalar NeoForge
             neoforge_version = version_data  # Es un string, no un dict
             if not neoforge_version:
-                QMessageBox.warning(self, "Error", "Versión de NeoForge inválida")
+                QMessageBox.warning(self, tr("error"), tr("invalid_neoforge_version"))
                 return
             
             print(f"[INFO] Iniciando instalación de NeoForge: {neoforge_version}")
@@ -1472,7 +1476,7 @@ class VersionDownloadDialog(QDialog):
             version_url = version_data.get("url")
             
             if not version_id or not version_url:
-                QMessageBox.warning(self, "Error", "Versión inválida")
+                QMessageBox.warning(self, tr("error"), tr("invalid_version"))
                 return
             
             print(f"[INFO] Iniciando descarga de versión: {version_id}")
@@ -1540,7 +1544,7 @@ class VersionDownloadDialog(QDialog):
     
     def on_download_error(self, error):
         """Se llama cuando hay un error en la descarga"""
-        self.status_label.setText(f"Error: {error}")
+        self.status_label.setText(tr("error_downloading", error=error))
         self.status_label.setStyleSheet("color: #fca5a5;")
         self.version_list.setEnabled(True)
         self.download_button.setEnabled(True)
@@ -1549,7 +1553,7 @@ class VersionDownloadDialog(QDialog):
                 self.parent().progress_bar.setVisible(False)
             if hasattr(self.parent(), 'progress_label'):
                 self.parent().progress_label.setVisible(False)
-        QMessageBox.critical(self, "Error", f"No se pudo descargar la versión:\n{error}")
+        QMessageBox.critical(self, tr("error"), tr("error_downloading", error=error))
 
 class InstallProfileThread(QThread):
     """Thread para instalar un perfil personalizado sin bloquear la UI"""
@@ -2597,7 +2601,7 @@ class CustomProfileDialog(QDialog):
         self.hostname = None
         self.install_thread = None
         
-        self.setWindowTitle("Instalar Perfil Personalizado")
+        self.setWindowTitle(tr("custom_profile_title"))
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.resize(800, 700)
@@ -2625,7 +2629,7 @@ class CustomProfileDialog(QDialog):
         title_bar_layout.setSpacing(5)
         title_bar.setLayout(title_bar_layout)
         
-        title = QLabel("Instalar Perfil Personalizado")
+        title = QLabel(tr("install_custom_profile"))
         title.setObjectName("titleLabel")
         title.setAlignment(Qt.AlignCenter)
         title_bar_layout.addWidget(title, 1)
@@ -2644,12 +2648,12 @@ class CustomProfileDialog(QDialog):
         
         # Campo de Hostname/IP
         hostname_layout = QHBoxLayout()
-        hostname_label = QLabel("Hostname o IP:")
+        hostname_label = QLabel(tr("hostname_or_ip") + ":")
         hostname_label.setStyleSheet("color: #e9d5ff; font-size: 12px;")
         hostname_layout.addWidget(hostname_label)
         
         self.hostname_input = QLineEdit()
-        self.hostname_input.setPlaceholderText("localhost o 192.168.1.1")
+        self.hostname_input.setPlaceholderText(tr("hostname_placeholder"))
         self.hostname_input.setStyleSheet("""
             QLineEdit {
                 background: #1a0d2e;
@@ -2665,7 +2669,7 @@ class CustomProfileDialog(QDialog):
         """)
         hostname_layout.addWidget(self.hostname_input, 1)
         
-        self.load_button = QPushButton("Cargar")
+        self.load_button = QPushButton(tr("load"))
         self.load_button.clicked.connect(self.load_profiles_json)
         self.load_button.setStyleSheet("""
             QPushButton {
@@ -2693,7 +2697,7 @@ class CustomProfileDialog(QDialog):
         
         # Selector de perfiles
         profile_layout = QHBoxLayout()
-        profile_label = QLabel("Perfil:")
+        profile_label = QLabel(tr("profile") + ":")
         profile_label.setStyleSheet("color: #e9d5ff; font-size: 12px;")
         profile_layout.addWidget(profile_label)
         
@@ -2779,7 +2783,7 @@ class CustomProfileDialog(QDialog):
         info_layout.addWidget(self.server_description_label)
         
         # Lista 1: Versiones necesarias
-        versions_group = QGroupBox("Versiones Necesarias")
+        versions_group = QGroupBox(tr("required_versions"))
         versions_group.setStyleSheet("""
             QGroupBox {
                 background: rgba(26, 13, 46, 0.8);
@@ -2815,7 +2819,7 @@ class CustomProfileDialog(QDialog):
         info_layout.addWidget(versions_group)
         
         # Lista 2: Mods
-        mods_group = QGroupBox("Mods")
+        mods_group = QGroupBox(tr("mods"))
         mods_group.setStyleSheet(versions_group.styleSheet())
         mods_layout = QVBoxLayout()
         self.mods_list = QListWidget()
@@ -2826,7 +2830,7 @@ class CustomProfileDialog(QDialog):
         info_layout.addWidget(mods_group)
         
         # Lista 3: Shaders
-        shaders_group = QGroupBox("Shaders")
+        shaders_group = QGroupBox(tr("shaders"))
         shaders_group.setStyleSheet(versions_group.styleSheet())
         shaders_layout = QVBoxLayout()
         self.shaders_list = QListWidget()
@@ -2837,7 +2841,7 @@ class CustomProfileDialog(QDialog):
         info_layout.addWidget(shaders_group)
         
         # Lista 4: Resource Packs
-        resourcepacks_group = QGroupBox("Resource Packs")
+        resourcepacks_group = QGroupBox(tr("resource_packs"))
         resourcepacks_group.setStyleSheet(versions_group.styleSheet())
         resourcepacks_layout = QVBoxLayout()
         self.resourcepacks_list = QListWidget()
@@ -2848,7 +2852,7 @@ class CustomProfileDialog(QDialog):
         info_layout.addWidget(resourcepacks_group)
         
         # Lista 5: Opciones
-        options_group = QGroupBox("Opciones")
+        options_group = QGroupBox(tr("options"))
         options_group.setStyleSheet(versions_group.styleSheet())
         options_layout = QVBoxLayout()
         self.options_list = QListWidget()
@@ -2909,7 +2913,7 @@ class CustomProfileDialog(QDialog):
         self.install_progress_label.setStyleSheet("color: #e9d5ff; font-size: 11px;")
         button_layout.addWidget(self.install_progress_label)
         
-        self.install_button = QPushButton("Instalar")
+        self.install_button = QPushButton(tr("install"))
         self.install_button.setEnabled(False)
         self.install_button.clicked.connect(self.start_installation)
         self.install_button.setStyleSheet("""
@@ -3371,7 +3375,7 @@ class LauncherWindow(QMainWindow):
     def _deferred_initialization(self):
         """Inicialización diferida: operaciones que no son críticas para mostrar la ventana"""
         # Mostrar mensaje de carga inicial
-        self.add_message("Inicializando launcher...")
+        self.add_message(tr("initializing_launcher"))
         
         # Paso 1: Cargar configuración (operaciones de archivo rápidas)
         QTimer.singleShot(50, lambda: self._load_config_step())
@@ -3381,7 +3385,7 @@ class LauncherWindow(QMainWindow):
         try:
             self.load_last_selected_version()
             self.developer_mode = self.load_developer_mode()
-            self.add_message("Configuración cargada")
+            self.add_message(tr("configuration_loaded"))
         except Exception as e:
             print(f"[ERROR] Error cargando configuración: {e}")
         
@@ -3418,7 +3422,7 @@ class LauncherWindow(QMainWindow):
     
     def init_ui(self):
         """Inicializa la interfaz de usuario"""
-        self.setWindowTitle("[SOMOS GAMERS] LAUNCHER")
+        self.setWindowTitle(tr("app_title"))
         
         # Ventana sin barra de título (frameless)
         self.setWindowFlags(Qt.FramelessWindowHint)
@@ -3716,7 +3720,7 @@ class LauncherWindow(QMainWindow):
         self.title_bar.setLayout(title_bar_layout)
         
         # Título (expandible para centrar)
-        title = QLabel("[SG] LAUNCHER ")
+        title = QLabel(tr("app_title") + " ")
         title.setObjectName("titleLabel")
         title.setAlignment(Qt.AlignCenter)
         title_bar_layout.addWidget(title, 1)  # Stretch factor 1 para que ocupe el espacio
@@ -3734,7 +3738,7 @@ class LauncherWindow(QMainWindow):
         self.user_avatar_label.setVisible(False)
         user_widget_layout.addWidget(self.user_avatar_label)
         
-        self.user_name_label = QLabel("Iniciar sesión")
+        self.user_name_label = QLabel(tr("sign_in"))
         self.user_name_label.setObjectName("userNameLabel")
         self.user_name_label.setStyleSheet("""
             QLabel#userNameLabel {
@@ -3787,7 +3791,7 @@ class LauncherWindow(QMainWindow):
         version_layout = QHBoxLayout()
         version_layout.setSpacing(5)  # Espaciado entre elementos
         version_layout.setAlignment(Qt.AlignVCenter)  # Alinear verticalmente al centro
-        version_label = QLabel("Versión Minecraft:")
+        version_label = QLabel(tr("version") + ":")
         version_label.setFixedHeight(40)  # Misma altura que combo y botón
         version_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)  # Alinear texto verticalmente
         version_label.setStyleSheet("font-size: 14px;")  # Mismo tamaño de fuente
@@ -3810,15 +3814,15 @@ class LauncherWindow(QMainWindow):
         add_version_menu = QMenu(self)
         
         # Opción 1: Vanilla
-        vanilla_action = add_version_menu.addAction("Vanilla")
+        vanilla_action = add_version_menu.addAction(tr("vanilla"))
         vanilla_action.triggered.connect(self.show_add_version_dialog)
         
         # Opción 2: NeoForge
-        neoforge_action = add_version_menu.addAction("NeoForge")
+        neoforge_action = add_version_menu.addAction(tr("neoforge"))
         neoforge_action.triggered.connect(self.show_neoforge_dialog)
         
         # Opción 3: Custom (Perfiles remotos)
-        custom_action = add_version_menu.addAction("Custom")
+        custom_action = add_version_menu.addAction(tr("custom"))
         custom_action.triggered.connect(self.show_custom_profile_dialog)
         
         # Conectar el botón al menú
@@ -3835,7 +3839,7 @@ class LauncherWindow(QMainWindow):
         java_layout = QHBoxLayout()
         java_layout.setSpacing(5)  # Mismo espaciado que el layout de versiones
         java_layout.setAlignment(Qt.AlignVCenter)  # Alinear verticalmente al centro
-        java_label = QLabel("Versión Java:")
+        java_label = QLabel(tr("java_version") + ":")
         java_label.setFixedHeight(40)  # Misma altura que combo y botón
         java_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)  # Alinear texto verticalmente
         java_label.setStyleSheet("font-size: 14px;")  # Mismo tamaño de fuente
@@ -3872,7 +3876,7 @@ class LauncherWindow(QMainWindow):
         self.version_combo.blockSignals(True)
         
         # Mostrar mensaje inicial mientras se cargan las versiones
-        self.version_combo.addItem("Cargando versiones...")
+        self.version_combo.addItem(tr("loading_versions"))
         self.version_combo.setEnabled(False)
         
         # Conectar save_selected_version DESPUÉS de cargar las versiones
@@ -3884,7 +3888,7 @@ class LauncherWindow(QMainWindow):
         # Botón de lanzar
         button_layout = QHBoxLayout()
         
-        self.launch_button = QPushButton("Lanzar Minecraft")
+        self.launch_button = QPushButton(tr("launch_minecraft"))
         self.launch_button.clicked.connect(self.launch_minecraft)
         # El botón se habilita cuando hay credenciales guardadas
         button_layout.addWidget(self.launch_button)
@@ -4125,7 +4129,7 @@ class LauncherWindow(QMainWindow):
             for display_name, version_id in organized_versions:
                 self.version_combo.addItem(display_name, version_id)
             
-            self.add_message(f"Versiones de Minecraft disponibles: {len(versions)} (solo descargadas)")
+            self.add_message(tr("versions_available", count=len(versions)))
             
             # Determinar qué versión seleccionar
             version_to_select = None
@@ -4152,7 +4156,7 @@ class LauncherWindow(QMainWindow):
                     self.add_message(f"Versión {version_to_select} seleccionada")
                     self._version_to_select_was_set = False  # Limpiar flag
                 else:
-                    self.add_message(f"Versión restaurada: {version_to_select}")
+                    self.add_message(tr("version_restored", version=version_to_select))
                 # Actualizar el fondo según la versión seleccionada (sin hacer merge)
                 display_name = self.version_combo.currentText()
                 self._update_background_for_version(version_to_select, display_name)
@@ -4256,7 +4260,7 @@ class LauncherWindow(QMainWindow):
             for display_name, version_id in organized_versions:
                 self.version_combo.addItem(display_name, version_id)
             
-            self.add_message(f"Versiones de Minecraft disponibles: {len(versions)} (solo descargadas)")
+            self.add_message(tr("versions_available", count=len(versions)))
             
             # Cargar la última versión seleccionada
             last_version = self.load_last_selected_version()
@@ -4654,7 +4658,7 @@ class LauncherWindow(QMainWindow):
             for i in range(self.java_combo.count()):
                 if self.java_combo.itemData(i) == best_path:
                     self.java_combo.setCurrentIndex(i)
-                    self.add_message(f"Java {best_version} seleccionada automáticamente (requiere {required_version}+)")
+                    self.add_message(tr("java_auto_selected", version=best_version, required=required_version))
                     break
         else:
             # No hay versión adecuada, mostrar advertencia
@@ -4923,7 +4927,7 @@ class LauncherWindow(QMainWindow):
                 
                 # Si el token no ha expirado, validarlo con la API
                 if access_token:
-                    self.add_message("Validando sesión...")
+                    self.add_message(tr("validating_session"))
                     is_valid = self.auth_manager.validate_token(access_token)
                     if is_valid:
                         # Token válido
@@ -4933,9 +4937,10 @@ class LauncherWindow(QMainWindow):
                         hours_left = int(time_until_expiry / 3600)
                         minutes_left = int((time_until_expiry % 3600) / 60)
                         if hours_left > 0:
-                            self.add_message(f"Sesión activa para: {username} ({hours_left}h {minutes_left}m restantes)")
+                            time_str = f"{hours_left}h {minutes_left}m"
                         else:
-                            self.add_message(f"Sesión activa para: {username} ({minutes_left}m restantes)")
+                            time_str = f"{minutes_left}m"
+                        self.add_message(tr("active_session", username=username, time=time_str))
                     else:
                         # Token inválido (revocado), intentar refrescar si tenemos refresh_token
                         if ms_refresh_token:
@@ -5797,7 +5802,7 @@ class LauncherWindow(QMainWindow):
             menu = QMenu(self)
             
             # Opción: Modo desarrollador (checkbox)
-            developer_action = menu.addAction("Modo desarrollador")
+            developer_action = menu.addAction(tr("developer_mode"))
             developer_action.setCheckable(True)
             developer_action.setChecked(self.developer_mode)
             developer_action.triggered.connect(self.toggle_developer_mode)
@@ -5805,14 +5810,24 @@ class LauncherWindow(QMainWindow):
             # Opción: Administrador de servidores (solo si modo desarrollador está activo)
             if self.developer_mode:
                 menu.addSeparator()
-                server_manager_action = menu.addAction("Administrador de servidores")
+                server_manager_action = menu.addAction(tr("server_manager"))
                 server_manager_action.triggered.connect(self.show_server_manager)
             
             # Separador
             menu.addSeparator()
             
+            # Opción: Idioma / Language
+            language_menu = menu.addMenu("Idioma / Language")
+            es_action = language_menu.addAction("Español")
+            es_action.triggered.connect(lambda: self.change_language("es"))
+            en_action = language_menu.addAction("English")
+            en_action.triggered.connect(lambda: self.change_language("en"))
+            
+            # Separador
+            menu.addSeparator()
+            
             # Opción: Cerrar sesión
-            logout_action = menu.addAction("Cerrar sesión")
+            logout_action = menu.addAction(tr("sign_out"))
             logout_action.triggered.connect(self.logout)
             
             # Mostrar el menú debajo del widget de usuario
@@ -5852,7 +5867,7 @@ class LauncherWindow(QMainWindow):
                 self._load_user_avatar(uuid)
         else:
             # Mostrar "Iniciar sesión"
-            self.user_name_label.setText("Iniciar sesión")
+            self.user_name_label.setText(tr("sign_in"))
             self.user_name_label.setStyleSheet("""
                 QLabel#userNameLabel {
                     color: #e9d5ff;
@@ -5929,14 +5944,40 @@ class LauncherWindow(QMainWindow):
         except Exception as e:
             print(f"Error guardando modo desarrollador: {e}")
     
+    def change_language(self, lang: str):
+        """Cambia el idioma del launcher"""
+        set_language(lang)
+        save_language_to_config(lang)
+        self.add_message(tr("language_changed"))
+        # Recargar la UI con el nuevo idioma
+        self._reload_ui_texts()
+    
+    def _reload_ui_texts(self):
+        """Recarga los textos de la UI con el idioma actual"""
+        # Actualizar labels principales
+        if hasattr(self, 'user_name_label'):
+            if not self.credential_storage.has_credentials():
+                self.user_name_label.setText(tr("sign_in"))
+        if hasattr(self, 'launch_button'):
+            self.launch_button.setText(tr("launch_minecraft"))
+        if hasattr(self, 'version_combo'):
+            # El combo de versiones se actualiza automáticamente
+            pass
+        # Actualizar título de la ventana
+        title = tr("app_title")
+        if hasattr(self, 'title_bar'):
+            for widget in self.title_bar.findChildren(QLabel):
+                if widget.objectName() == "titleLabel":
+                    widget.setText(title + " ")
+    
     def toggle_developer_mode(self, checked: bool):
         """Alterna el modo desarrollador"""
         self.developer_mode = checked
         self.save_developer_mode(checked)
         if checked:
-            self.add_message("Modo desarrollador activado")
+            self.add_message(tr("developer_mode_enabled"))
         else:
-            self.add_message("Modo desarrollador desactivado")
+            self.add_message(tr("developer_mode_disabled"))
     
     def logout(self):
         """Cierra la sesión y elimina las credenciales"""

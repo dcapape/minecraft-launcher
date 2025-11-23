@@ -9,6 +9,7 @@ from PyQt5.QtWidgets import (QDialog, QWidget, QVBoxLayout, QHBoxLayout,
                              QMessageBox, QComboBox, QListWidget, QCheckBox, 
                              QGroupBox, QScrollArea, QInputDialog, QApplication)
 from PyQt5.QtCore import Qt
+from translations import tr
 
 
 def fetch_profiles_json(hostname, api_key=None):
@@ -62,7 +63,7 @@ class ServerManagerDialog(QDialog):
         self.api_key_input = None  # Se inicializará en init_ui
         self.save_apikey_btn = None  # Se inicializará en init_ui
         
-        self.setWindowTitle("Administrador de Servidores")
+        self.setWindowTitle(tr("server_manager_title"))
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.resize(1000, 800)
@@ -112,7 +113,7 @@ class ServerManagerDialog(QDialog):
         title_bar_layout.setSpacing(5)
         title_bar.setLayout(title_bar_layout)
         
-        title = QLabel("Administrador de Servidores")
+        title = QLabel(tr("server_manager_title"))
         title.setObjectName("titleLabel")
         title.setAlignment(Qt.AlignCenter)
         title_bar_layout.addWidget(title, 1)
@@ -140,7 +141,7 @@ class ServerManagerDialog(QDialog):
         
         # Selector de servidores
         server_layout = QHBoxLayout()
-        server_label = QLabel("Servidor:")
+        server_label = QLabel(tr("server") + ":")
         server_label.setStyleSheet("color: #e9d5ff; font-size: 12px;")
         server_layout.addWidget(server_label)
         
@@ -176,7 +177,7 @@ class ServerManagerDialog(QDialog):
         
         add_server_btn = QPushButton("+")
         add_server_btn.setFixedSize(28, 28)
-        add_server_btn.setToolTip("Añadir servidor")
+        add_server_btn.setToolTip(tr("add_server_tooltip"))
         add_server_btn.clicked.connect(self.add_server)
         add_server_btn.setStyleSheet("""
             QPushButton {
@@ -198,7 +199,7 @@ class ServerManagerDialog(QDialog):
         
         reload_info_btn = QPushButton("🔄")
         reload_info_btn.setFixedSize(28, 28)
-        reload_info_btn.setToolTip("Recargar información del servidor")
+        reload_info_btn.setToolTip(tr("reload_info_tooltip"))
         reload_info_btn.clicked.connect(self.reload_server_info)
         reload_info_btn.setStyleSheet("""
             QPushButton {
@@ -232,7 +233,7 @@ class ServerManagerDialog(QDialog):
         apikey_layout.addWidget(apikey_label)
         
         self.api_key_input = QLineEdit()
-        self.api_key_input.setPlaceholderText("API Key del servidor")
+        self.api_key_input.setPlaceholderText(tr("api_key_placeholder"))
         self.api_key_input.setEnabled(False)
         self.api_key_input.setStyleSheet("""
             QLineEdit {
@@ -261,7 +262,7 @@ class ServerManagerDialog(QDialog):
         
         save_apikey_btn = QPushButton("💾")
         save_apikey_btn.setFixedSize(28, 28)
-        save_apikey_btn.setToolTip("Guardar API Key")
+        save_apikey_btn.setToolTip(tr("save_api_key_tooltip"))
         save_apikey_btn.setEnabled(False)
         save_apikey_btn.clicked.connect(self.save_api_key)
         save_apikey_btn.setStyleSheet("""
@@ -293,7 +294,7 @@ class ServerManagerDialog(QDialog):
         
         # Selector de perfiles
         profile_layout = QHBoxLayout()
-        profile_label = QLabel("Perfil:")
+        profile_label = QLabel(tr("profile") + ":")
         profile_label.setStyleSheet("color: #e9d5ff; font-size: 12px;")
         profile_layout.addWidget(profile_label)
         
@@ -339,7 +340,7 @@ class ServerManagerDialog(QDialog):
         # Campos de edición del perfil
         # ID del servidor
         id_layout = QHBoxLayout()
-        id_label = QLabel("ID del perfil:")
+        id_label = QLabel(tr("profile_id_label") + ":")
         id_label.setStyleSheet("color: #e9d5ff; font-size: 12px;")
         id_label.setFixedWidth(150)
         id_layout.addWidget(id_label)
@@ -364,7 +365,7 @@ class ServerManagerDialog(QDialog):
         
         # Nombre
         name_layout = QHBoxLayout()
-        name_label = QLabel("Nombre:")
+        name_label = QLabel(tr("name") + ":")
         name_label.setStyleSheet("color: #e9d5ff; font-size: 12px;")
         name_label.setFixedWidth(150)
         name_layout.addWidget(name_label)
@@ -377,7 +378,7 @@ class ServerManagerDialog(QDialog):
         
         # Descripción
         desc_layout = QHBoxLayout()
-        desc_label = QLabel("Descripción:")
+        desc_label = QLabel(tr("description") + ":")
         desc_label.setStyleSheet("color: #e9d5ff; font-size: 12px;")
         desc_label.setFixedWidth(150)
         desc_layout.addWidget(desc_label)
@@ -389,7 +390,7 @@ class ServerManagerDialog(QDialog):
         edit_layout.addLayout(desc_layout)
         
         # Lista de mods
-        mods_group = QGroupBox("Mods")
+        mods_group = QGroupBox(tr("mods"))
         mods_group.setStyleSheet("""
             QGroupBox {
                 background: rgba(26, 13, 46, 0.8);
@@ -426,7 +427,7 @@ class ServerManagerDialog(QDialog):
         
         add_mod_btn = QPushButton("+")
         add_mod_btn.setFixedSize(30, 30)
-        add_mod_btn.setToolTip("Añadir mod desde .minecraft")
+        add_mod_btn.setToolTip(tr("add_mod"))
         add_mod_btn.clicked.connect(self.add_mod_from_minecraft)
         add_mod_btn.setStyleSheet("""
             QPushButton {
@@ -450,7 +451,7 @@ class ServerManagerDialog(QDialog):
         edit_layout.addWidget(mods_group)
         
         # Lista de shaders
-        shaders_group = QGroupBox("Shaders")
+        shaders_group = QGroupBox(tr("shaders"))
         shaders_group.setStyleSheet("""
             QGroupBox {
                 background: rgba(26, 13, 46, 0.8);
@@ -488,7 +489,7 @@ class ServerManagerDialog(QDialog):
         
         add_shader_btn = QPushButton("+")
         add_shader_btn.setFixedSize(30, 30)
-        add_shader_btn.setToolTip("Añadir shader desde .minecraft")
+        add_shader_btn.setToolTip(tr("add_shader"))
         add_shader_btn.clicked.connect(self.add_shader_from_minecraft)
         add_shader_btn.setStyleSheet("""
             QPushButton {
@@ -512,7 +513,7 @@ class ServerManagerDialog(QDialog):
         edit_layout.addWidget(shaders_group)
         
         # Lista de resource packs
-        resourcepacks_group = QGroupBox("Resource Packs")
+        resourcepacks_group = QGroupBox(tr("resource_packs"))
         resourcepacks_group.setStyleSheet(shaders_group.styleSheet())
         resourcepacks_layout = QVBoxLayout()
         
@@ -525,7 +526,7 @@ class ServerManagerDialog(QDialog):
         
         add_resourcepack_btn = QPushButton("+")
         add_resourcepack_btn.setFixedSize(30, 30)
-        add_resourcepack_btn.setToolTip("Añadir resource pack desde .minecraft")
+        add_resourcepack_btn.setToolTip(tr("add_resourcepack"))
         add_resourcepack_btn.clicked.connect(self.add_resourcepack_from_minecraft)
         add_resourcepack_btn.setStyleSheet(add_shader_btn.styleSheet())
         resourcepacks_list_layout.addWidget(add_resourcepack_btn)
@@ -535,11 +536,11 @@ class ServerManagerDialog(QDialog):
         edit_layout.addWidget(resourcepacks_group)
         
         # Opciones
-        options_group = QGroupBox("Opciones")
+        options_group = QGroupBox(tr("options"))
         options_group.setStyleSheet(shaders_group.styleSheet())
         options_layout = QVBoxLayout()
         
-        self.enable_shaders_checkbox = QCheckBox("Activar shaders")
+        self.enable_shaders_checkbox = QCheckBox(tr("enable_shaders"))
         self.enable_shaders_checkbox.setStyleSheet("""
             QCheckBox {
                 color: #e9d5ff;
@@ -564,7 +565,7 @@ class ServerManagerDialog(QDialog):
         self.enable_shaders_checkbox.stateChanged.connect(self.update_options)
         options_layout.addWidget(self.enable_shaders_checkbox)
         
-        self.enable_resourcepacks_checkbox = QCheckBox("Activar resource packs")
+        self.enable_resourcepacks_checkbox = QCheckBox(tr("enable_resourcepacks"))
         self.enable_resourcepacks_checkbox.setStyleSheet(self.enable_shaders_checkbox.styleSheet())
         self.enable_resourcepacks_checkbox.stateChanged.connect(self.update_options)
         options_layout.addWidget(self.enable_resourcepacks_checkbox)
@@ -573,7 +574,7 @@ class ServerManagerDialog(QDialog):
         edit_layout.addWidget(options_group)
         
         # Textarea con JSON
-        json_label = QLabel("JSON del perfil:")
+        json_label = QLabel(tr("json_data_label") + ":")
         json_label.setStyleSheet("color: #e9d5ff; font-size: 12px;")
         edit_layout.addWidget(json_label)
         
@@ -601,7 +602,7 @@ class ServerManagerDialog(QDialog):
         button_layout = QHBoxLayout()
         button_layout.addStretch()
         
-        self.apply_button = QPushButton("Aplicar")
+        self.apply_button = QPushButton(tr("apply"))
         self.apply_button.setEnabled(False)
         self.apply_button.clicked.connect(self.apply_changes)
         self.apply_button.setStyleSheet("""
@@ -627,7 +628,7 @@ class ServerManagerDialog(QDialog):
         """)
         button_layout.addWidget(self.apply_button)
         
-        cancel_button = QPushButton("Cancelar")
+        cancel_button = QPushButton(tr("cancel"))
         cancel_button.clicked.connect(self.reject)
         cancel_button.setStyleSheet("""
             QPushButton {
@@ -645,7 +646,7 @@ class ServerManagerDialog(QDialog):
         """)
         button_layout.addWidget(cancel_button)
         
-        self.accept_button = QPushButton("Aceptar")
+        self.accept_button = QPushButton(tr("accept"))
         self.accept_button.setEnabled(False)
         self.accept_button.clicked.connect(self.accept_and_close)
         self.accept_button.setStyleSheet(self.apply_button.styleSheet())
@@ -777,7 +778,7 @@ class ServerManagerDialog(QDialog):
     def add_server(self):
         """Abre diálogo para añadir un nuevo servidor"""
         dialog = QDialog(self)
-        dialog.setWindowTitle("Añadir Servidor")
+        dialog.setWindowTitle(tr("add_server"))
         dialog.resize(400, 200)
         
         # Widget central con fondo morado
@@ -795,13 +796,13 @@ class ServerManagerDialog(QDialog):
         
         # Hostname/IP
         hostname_layout = QHBoxLayout()
-        hostname_label = QLabel("Hostname/IP:")
+        hostname_label = QLabel(tr("hostname_label") + ":")
         hostname_label.setStyleSheet("color: #e9d5ff; font-size: 12px;")
         hostname_label.setFixedWidth(100)
         hostname_layout.addWidget(hostname_label)
         
         hostname_input = QLineEdit()
-        hostname_input.setPlaceholderText("servidormc.com o 192.168.1.1")
+        hostname_input.setPlaceholderText(tr("hostname_placeholder_server"))
         hostname_input.setStyleSheet("""
             QLineEdit {
                 background: #1a0d2e;
@@ -826,7 +827,7 @@ class ServerManagerDialog(QDialog):
         apikey_layout.addWidget(apikey_label)
         
         apikey_input = QLineEdit()
-        apikey_input.setPlaceholderText("Tu API key del servidor")
+        apikey_input.setPlaceholderText(tr("api_key_placeholder"))
         apikey_input.setStyleSheet(hostname_input.styleSheet())
         apikey_layout.addWidget(apikey_input, 1)
         layout.addLayout(apikey_layout)
@@ -835,7 +836,7 @@ class ServerManagerDialog(QDialog):
         button_layout = QHBoxLayout()
         button_layout.addStretch()
         
-        cancel_btn = QPushButton("Cancelar")
+        cancel_btn = QPushButton(tr("cancel"))
         cancel_btn.clicked.connect(dialog.reject)
         cancel_btn.setStyleSheet("""
             QPushButton {
@@ -852,7 +853,7 @@ class ServerManagerDialog(QDialog):
         """)
         button_layout.addWidget(cancel_btn)
         
-        ok_btn = QPushButton("Aceptar")
+        ok_btn = QPushButton(tr("accept"))
         ok_btn.clicked.connect(lambda: self._save_new_server(dialog, hostname_input.text(), apikey_input.text()))
         ok_btn.setStyleSheet("""
             QPushButton {
@@ -893,7 +894,7 @@ class ServerManagerDialog(QDialog):
     def _save_new_server(self, dialog, hostname, api_key):
         """Guarda un nuevo servidor"""
         if not hostname or not api_key:
-            QMessageBox.warning(dialog, "Error", "Por favor, completa todos los campos")
+            QMessageBox.warning(dialog, tr("error"), tr("please_complete_all_fields"))
             return
         
         new_server = {
@@ -915,7 +916,7 @@ class ServerManagerDialog(QDialog):
         
         new_api_key = self.api_key_input.text()
         if not new_api_key:
-            QMessageBox.warning(self, "Error", "La API Key no puede estar vacía")
+            QMessageBox.warning(self, tr("error"), tr("api_key_cannot_be_empty"))
             return
         
         # Actualizar la API KEY en el servidor actual
@@ -937,8 +938,8 @@ class ServerManagerDialog(QDialog):
         # Preguntar si quiere recargar la información
         reply = QMessageBox.question(
             self, 
-            "API Key Guardada", 
-            "API Key guardada correctamente.\n\n¿Deseas recargar la información del servidor ahora?",
+            tr("info"), 
+            tr("api_key_saved_reload_question"),
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.Yes
         )
@@ -1006,7 +1007,7 @@ class ServerManagerDialog(QDialog):
                     return
             else:
                 print(f"[DEBUG] No hay servidor seleccionado en el combo")
-                QMessageBox.warning(self, "Advertencia", "Por favor, selecciona un servidor primero.")
+                QMessageBox.warning(self, tr("warning"), tr("please_select_server_first"))
                 return
         
         hostname = self.current_server.get("hostname")
@@ -1026,7 +1027,7 @@ class ServerManagerDialog(QDialog):
             print(f"[DEBUG] Error: {error_message}")
             error_msg = f"{error_message}\n\n"
             error_msg += "Puedes editar la API Key arriba y hacer clic en '🔄' para recargar."
-            QMessageBox.warning(self, "Advertencia", error_msg)
+            QMessageBox.warning(self, tr("warning"), error_msg)
             # Limpiar datos si falla
             self.current_json_data = None
             self.profile_combo.clear()
@@ -1035,7 +1036,7 @@ class ServerManagerDialog(QDialog):
         
         if not json_data:
             print(f"[DEBUG] No se recibieron datos")
-            QMessageBox.warning(self, "Advertencia", "No se recibieron datos del servidor")
+            QMessageBox.warning(self, tr("warning"), tr("no_server_data_received"))
             self.current_json_data = None
             self.profile_combo.clear()
             self.profile_combo.setEnabled(False)
@@ -1062,7 +1063,7 @@ class ServerManagerDialog(QDialog):
             traceback.print_exc()
             error_msg = f"Error inesperado:\n{str(e)}\n\n"
             error_msg += "Puedes editar la API Key arriba y hacer clic en '🔄' para recargar."
-            QMessageBox.warning(self, "Advertencia", error_msg)
+            QMessageBox.warning(self, tr("warning"), error_msg)
             # Limpiar datos si falla
             self.current_json_data = None
             self.profile_combo.clear()
@@ -1130,7 +1131,7 @@ class ServerManagerDialog(QDialog):
         """Abre diálogo para seleccionar shader desde .minecraft/shaders"""
         shaderpacks_dir = os.path.join(self.minecraft_launcher.minecraft_path, "shaderpacks")
         if not os.path.exists(shaderpacks_dir):
-            QMessageBox.warning(self, "Error", "No se encontró la carpeta de shaders en .minecraft")
+            QMessageBox.warning(self, tr("error"), tr("shaders_folder_not_found"))
             return
         
         # Obtener shaders ya añadidos a la lista (sin el sufijo " (Activado)")
@@ -1175,7 +1176,7 @@ class ServerManagerDialog(QDialog):
         """Abre diálogo para seleccionar mod desde .minecraft/mods"""
         mods_dir = os.path.join(self.minecraft_launcher.minecraft_path, "mods")
         if not os.path.exists(mods_dir):
-            QMessageBox.warning(self, "Error", "No se encontró la carpeta de mods en .minecraft")
+            QMessageBox.warning(self, tr("error"), tr("mods_folder_not_found"))
             return
         
         # Obtener mods ya añadidos a la lista (sin el sufijo " (Requerido)")
@@ -1220,7 +1221,7 @@ class ServerManagerDialog(QDialog):
         """Abre diálogo para seleccionar resource pack desde .minecraft/resourcepacks"""
         resourcepacks_dir = os.path.join(self.minecraft_launcher.minecraft_path, "resourcepacks")
         if not os.path.exists(resourcepacks_dir):
-            QMessageBox.warning(self, "Error", "No se encontró la carpeta de resource packs en .minecraft")
+            QMessageBox.warning(self, tr("error"), tr("resourcepacks_folder_not_found"))
             return
         
         # Obtener resource packs ya añadidos a la lista (sin el sufijo " (Activado)")
