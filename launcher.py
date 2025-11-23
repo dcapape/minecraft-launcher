@@ -3862,8 +3862,6 @@ class LauncherWindow(QMainWindow):
         
         java_container.addLayout(java_layout)
         
-        # Label para mostrar la versión de Java requerida (debajo del dropdown)
-        
         layout.addLayout(java_container)
         
         # Cargar versiones de Java inmediatamente (es rápido)

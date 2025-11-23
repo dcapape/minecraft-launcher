@@ -348,7 +348,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "authentication_error": "Authentication error",
         "java_not_found": "Java not found",
         "java_required_version": "Java {version} or higher required",
-        "minecraft_not_detected": "Minecraft not detected",
+        "minecraft_detected": "✓ Minecraft detected",
+        "minecraft_not_detected": "✗ Minecraft not detected",
         "version_not_found": "Version {version} not found",
         
         # Menu items
