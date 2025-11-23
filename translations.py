@@ -141,7 +141,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "all_neoforge_versions_installed": "Todas las versiones de NeoForge ya están instaladas",
         "neoforge_versions_available": "{count} versiones de NeoForge disponibles",
         "all_versions_downloaded": "Todas las versiones {type} ya están descargadas",
-        "versions_available": "{count} versiones {type}",
+        "versions_available": "{count} {type} versiones",
         "error_loading_versions": "Error cargando versiones: {error}",
         "please_select_version": "Por favor selecciona una versión",
         "could_not_determine_minecraft_path": "No se pudo determinar la ruta de Minecraft",
