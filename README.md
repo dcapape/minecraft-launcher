@@ -23,6 +23,10 @@ A custom launcher for Minecraft Java Edition that maintains user credentials for
 - ✅ **Automatic asset downloading** - Downloads and verifies Minecraft assets from Mojang servers
 - ✅ **Server Manager** (Developer Mode) - Manage remote server profiles and configurations
 - ✅ **Isolated profile directories** - Each custom profile has its own mods, shaders, resource packs, and config
+- ✅ **Automatic server addition** - Custom profiles automatically add server to Minecraft Multiplayer list
+- ✅ **Profile update checking** - Automatically checks for updates (mods, shaders, resource packs) when launching custom profiles
+- ✅ **Improved application loading** - UI appears immediately, data loads progressively in background
+- ✅ **Purple-themed UI** - Consistent purple color scheme throughout the interface
 
 ## Requirements
 
@@ -101,7 +105,9 @@ python launcher.py
      - Download all specified mods, shaders, and resource packs
      - Configure the profile's `options.txt` file
      - Download all required assets from Mojang servers
+     - Add the server to Minecraft's Multiplayer list
    - Custom profiles are stored in `.minecraft/profiles/{profile_id}/` with complete isolation
+   - When launching a custom profile, the launcher automatically checks for updates from the server
 
 5. **Launch Minecraft:**
    - Click "Launch Minecraft" to start the game
@@ -321,6 +327,22 @@ The launcher properly handles version inheritance by:
 - Extracted to unique temporary directory: `.minecraft/bin/<HASH>/`
 - Only architecture-specific files are extracted (e.g., `windows/x64/`)
 - Files are placed directly in the root of the hash directory (no nested structure)
+
+## New Features in v1.1.1
+
+- **Automatic Server Addition**: 
+  - Custom profiles automatically add the server to Minecraft's Multiplayer list (`servers.dat`)
+  - Server information is added/updated every time a custom profile is launched
+  - Supports `auto_connect` option to automatically connect to the server on launch
+- **Profile Update Checking**:
+  - Automatically checks for updates (mods, shaders, resource packs, options) when launching custom profiles
+  - Downloads new or updated files from the server
+  - Updates `options.txt` if server configuration has changed
+- **Improved Application Loading**:
+  - UI appears immediately when the launcher starts
+  - Data loads progressively in the background (configuration, credentials, versions)
+  - User sees progress messages in real-time
+  - Much faster perceived startup time
 
 ## New Features in v1.1.0
 

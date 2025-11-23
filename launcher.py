@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QTextEdit, QMessageBox, QProgressBar, QDialog, QDialogButtonBox,
                              QComboBox, QMenu, QGraphicsOpacityEffect, QListWidget, QListWidgetItem,
                              QCheckBox, QGroupBox, QScrollArea, QInputDialog)
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QUrl, QPoint, QPropertyAnimation, QEasingCurve
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QUrl, QPoint, QPropertyAnimation, QEasingCurve, QTimer
 from PyQt5.QtGui import QColor, QPainter, QPen, QBrush, QPixmap, QPalette, QRegion, QPainterPath
 from PyQt5.QtCore import QRect
 import requests
@@ -29,6 +29,16 @@ from minecraft_launcher import MinecraftLauncher
 from server_manager import ServerManagerDialog, fetch_profiles_json
 from asset_downloader import AssetDownloader
 
+# Verificar que nbtlib esté instalado
+try:
+    import nbtlib
+except ImportError:
+    print("[ERROR] nbtlib no está instalado. Algunas funciones no estarán disponibles.")
+    print("[ERROR] Instala con: pip install nbtlib")
+    print("[ERROR] O ejecuta el launcher con el Python del entorno virtual:")
+    print("[ERROR]   .venv\\Scripts\\python.exe launcher.py")
+    nbtlib = None
+
 class LoadVersionsThread(QThread):
     """Thread para cargar versiones de Minecraft sin bloquear la UI"""
     finished = pyqtSignal(list)  # lista de versiones
@@ -45,6 +55,35 @@ class LoadVersionsThread(QThread):
             self.finished.emit(versions)
         except Exception as e:
             self.error.emit(str(e))
+
+class LaunchMinecraftThread(QThread):
+    """Thread para lanzar Minecraft sin bloquear la UI"""
+    finished = pyqtSignal(bool, object)  # success, detected_java_version
+    message = pyqtSignal(str)  # mensaje para mostrar en la UI
+    
+    def __init__(self, minecraft_launcher, credentials, version, java_path=None, game_dir=None):
+        super().__init__()
+        self.minecraft_launcher = minecraft_launcher
+        self.credentials = credentials
+        self.version = version
+        self.java_path = java_path
+        self.game_dir = game_dir
+    
+    def run(self):
+        try:
+            self.message.emit("Iniciando proceso de Minecraft...")
+            success, detected_java_version = self.minecraft_launcher.launch_minecraft(
+                self.credentials, 
+                self.version, 
+                self.java_path, 
+                game_dir=self.game_dir
+            )
+            self.finished.emit(success, detected_java_version)
+        except Exception as e:
+            print(f"[ERROR] Error en LaunchMinecraftThread: {e}")
+            import traceback
+            traceback.print_exc()
+            self.finished.emit(False, None)
 
 class JavaDownloadThread(QThread):
     """Thread para descargar Java sin bloquear la UI"""
@@ -1149,6 +1188,14 @@ class InstallProfileThread(QThread):
             self.progress.emit(90, 100, "Configurando opciones...")
             self._configure_options(profile_dir)
             
+            # Paso 6: Guardar configuración del perfil (hostname, server_url, etc.)
+            self.progress.emit(95, 100, "Guardando configuración del perfil...")
+            self._save_profile_config(profile_dir)
+            
+            # Paso 7: Agregar servidor a la lista de Multiplayer
+            self.progress.emit(97, 100, "Configurando servidor...")
+            self._add_server_to_list(profile_dir)
+            
             self.progress.emit(100, 100, "Instalación completada")
             self.finished.emit(profile_id)
             
@@ -1899,6 +1946,157 @@ class InstallProfileThread(QThread):
             for key, value in options_dict.items():
                 f.write(f"{key}:{value}\n")
     
+    def _save_profile_config(self, profile_dir):
+        """Guarda la configuración del perfil (hostname, server_url) para poder recuperarla después"""
+        profile_config_path = os.path.join(profile_dir, "profile_config.json")
+        config = {
+            "hostname": self.hostname,
+            "server_url": self.profiles_data.get("server_url") if self.profiles_data else None,
+            "profile_id": self.profile.get("id"),
+            "profile_name": self.profile.get("name"),
+            "installed_at": time.time()
+        }
+        
+        try:
+            with open(profile_config_path, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=2)
+            print(f"[INFO] Configuración del perfil guardada: {profile_config_path}")
+        except Exception as e:
+            print(f"[WARN] Error guardando configuración del perfil: {e}")
+    
+    def _add_server_to_list(self, profile_dir):
+        """Agrega el servidor a la lista de Multiplayer del perfil (servers.dat)"""
+        config = self.profile.get("config", {})
+        server_ip = config.get("server_ip")
+        server_port = config.get("server_port", 25565)
+        auto_connect = config.get("auto_connect", False)
+        
+        print(f"[DEBUG] _add_server_to_list() llamado")
+        print(f"[DEBUG]   profile_dir: {profile_dir}")
+        print(f"[DEBUG]   server_ip: {server_ip}")
+        print(f"[DEBUG]   server_port: {server_port}")
+        print(f"[DEBUG]   auto_connect: {auto_connect}")
+        
+        if not server_ip:
+            print(f"[DEBUG] No hay server_ip configurado, saltando agregar servidor")
+            return  # No hay servidor configurado
+        
+        if nbtlib is None:
+            print(f"[ERROR] nbtlib no está instalado. No se puede agregar servidor a la lista.")
+            print(f"[ERROR] Instala con: pip install nbtlib")
+            print(f"[ERROR] O ejecuta el launcher con el Python del entorno virtual:")
+            print(f"[ERROR]   .venv\\Scripts\\python.exe launcher.py")
+            return
+        
+        try:
+            from nbtlib import File, String, Byte, List, Compound
+            
+            servers_dat_path = os.path.join(profile_dir, "servers.dat")
+            print(f"[DEBUG] Ruta de servers.dat: {servers_dat_path}")
+            
+            # Leer servers.dat existente o crear uno nuevo
+            if os.path.exists(servers_dat_path):
+                print(f"[DEBUG] servers.dat existe, leyendo...")
+                try:
+                    nbt_file = File.load(servers_dat_path, gzipped=False)
+                    servers_list = nbt_file.get("servers", List[Compound]([]))
+                    print(f"[DEBUG] Servidores existentes en servers.dat: {len(servers_list)}")
+                    for idx, srv in enumerate(servers_list):
+                        if isinstance(srv, Compound):
+                            print(f"[DEBUG]   [{idx}] {srv.get('name', 'Sin nombre')} - {srv.get('ip', 'Sin IP')}")
+                except Exception as e:
+                    print(f"[WARN] Error leyendo servers.dat, creando uno nuevo: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    nbt_file = File()
+                    servers_list = List[Compound]([])
+            else:
+                print(f"[DEBUG] servers.dat no existe, creando uno nuevo")
+                nbt_file = File()
+                servers_list = List[Compound]([])
+            
+            # Verificar si el servidor ya existe
+            server_name = self.profile.get("name", "Servidor")
+            server_address = f"{server_ip}:{server_port}" if server_port != 25565 else server_ip
+            
+            print(f"[DEBUG] Buscando servidor: nombre='{server_name}', dirección='{server_address}'")
+            
+            # Buscar si ya existe
+            server_exists = False
+            for server in servers_list:
+                if isinstance(server, Compound):
+                    existing_ip = server.get("ip", "")
+                    existing_name = server.get("name", "")
+                    print(f"[DEBUG]   Comparando con servidor existente: '{existing_name}' - '{existing_ip}'")
+                    if existing_ip == server_address or existing_ip == server_ip:
+                        server_exists = True
+                        print(f"[DEBUG]   Servidor ya existe en la lista")
+                        # Actualizar nombre si es diferente
+                        if server.get("name") != server_name:
+                            server["name"] = String(server_name)
+                            print(f"[DEBUG]   Nombre actualizado: {server_name}")
+                        break
+            
+            # Agregar servidor si no existe
+            if not server_exists:
+                print(f"[DEBUG] Agregando nuevo servidor a la lista...")
+                new_server = Compound({
+                    "name": String(server_name),
+                    "ip": String(server_address),
+                    "icon": String(""),  # Sin icono por defecto
+                    "acceptTextures": Byte(1)  # Aceptar resource packs del servidor
+                })
+                servers_list.append(new_server)
+                print(f"[INFO] Servidor agregado a la lista: {server_name} ({server_address})")
+            else:
+                print(f"[DEBUG] Servidor ya existe, no se agregó duplicado")
+            
+            # Guardar servers.dat
+            print(f"[DEBUG] Guardando servers.dat con {len(servers_list)} servidor(es)...")
+            nbt_file["servers"] = servers_list
+            nbt_file.save(servers_dat_path)
+            print(f"[DEBUG] servers.dat guardado exitosamente en: {servers_dat_path}")
+            
+            # Verificar que se guardó correctamente
+            if os.path.exists(servers_dat_path):
+                file_size = os.path.getsize(servers_dat_path)
+                print(f"[DEBUG] Verificación: servers.dat existe, tamaño: {file_size} bytes")
+            else:
+                print(f"[ERROR] servers.dat no se creó después de guardar!")
+            
+            # Si auto_connect está habilitado, guardar en options.txt
+            if auto_connect:
+                print(f"[DEBUG] auto_connect habilitado, guardando en options.txt...")
+                options_path = os.path.join(profile_dir, "options.txt")
+                options_dict = {}
+                if os.path.exists(options_path):
+                    with open(options_path, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            line = line.strip()
+                            if ':' in line:
+                                key, value = line.split(':', 1)
+                                options_dict[key.strip()] = value.strip()
+                
+                # Guardar último servidor conectado (Minecraft lo usa para auto-conectar)
+                options_dict["lastServer"] = server_address
+                print(f"[DEBUG] lastServer configurado en options.txt: {server_address}")
+                
+                with open(options_path, 'w', encoding='utf-8') as f:
+                    for key, value in options_dict.items():
+                        f.write(f"{key}:{value}\n")
+            else:
+                print(f"[DEBUG] auto_connect deshabilitado, no se configuró lastServer")
+                
+        except ImportError:
+            print("[ERROR] nbtlib no está instalado. No se puede agregar servidor a la lista.")
+            print("[ERROR] Instala con: pip install nbtlib")
+            import traceback
+            traceback.print_exc()
+        except Exception as e:
+            print(f"[ERROR] Error agregando servidor a la lista: {e}")
+            import traceback
+            traceback.print_exc()
+    
     def _find_java(self):
         """Encuentra una instalación de Java"""
         creationflags = subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0
@@ -2070,14 +2268,39 @@ class CustomProfileDialog(QDialog):
                 background: #1a0d2e;
                 width: 12px;
                 border-radius: 6px;
+                border: 1px solid #6d28d9;
             }
             QScrollBar::handle:vertical {
                 background: #6d28d9;
                 border-radius: 6px;
                 min-height: 20px;
+                border: 1px solid #8b5cf6;
             }
             QScrollBar::handle:vertical:hover {
                 background: #8b5cf6;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                background: #1a0d2e;
+                height: 0px;
+            }
+            QScrollBar:horizontal {
+                background: #1a0d2e;
+                height: 12px;
+                border-radius: 6px;
+                border: 1px solid #6d28d9;
+            }
+            QScrollBar::handle:horizontal {
+                background: #6d28d9;
+                border-radius: 6px;
+                min-width: 20px;
+                border: 1px solid #8b5cf6;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background: #8b5cf6;
+            }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                background: #1a0d2e;
+                width: 0px;
             }
         """)
         
@@ -2680,6 +2903,7 @@ class LauncherWindow(QMainWindow):
         self.java_download_thread = None
         self.version_download_thread = None  # Thread para descargar versiones
         self.version_download_dialog = None  # Referencia al diálogo de descarga de versiones
+        self.launch_minecraft_thread = None  # Thread para lanzar Minecraft
         self.old_pos = None  # Para arrastrar la ventana
         self.title_bar = None  # Referencia a la barra de título
         
@@ -2694,24 +2918,55 @@ class LauncherWindow(QMainWindow):
         
         # Diferir operaciones pesadas hasta después de mostrar la ventana
         # Usar QTimer para ejecutar después de que el evento loop esté corriendo
-        from PyQt5.QtCore import QTimer
         QTimer.singleShot(0, self._deferred_initialization)
     
     def _deferred_initialization(self):
         """Inicialización diferida: operaciones que no son críticas para mostrar la ventana"""
-        # Cargar configuración (operaciones de archivo rápidas)
-        self.load_last_selected_version()
-        self.developer_mode = self.load_developer_mode()
+        # Mostrar mensaje de carga inicial
+        self.add_message("Inicializando launcher...")
         
-        # Cargar imagen de fondo de forma diferida
-        if self._bg_label:
-            self._load_background_image("default")
+        # Paso 1: Cargar configuración (operaciones de archivo rápidas)
+        QTimer.singleShot(50, lambda: self._load_config_step())
+    
+    def _load_config_step(self):
+        """Paso 1: Cargar configuración"""
+        try:
+            self.load_last_selected_version()
+            self.developer_mode = self.load_developer_mode()
+            self.add_message("Configuración cargada")
+        except Exception as e:
+            print(f"[ERROR] Error cargando configuración: {e}")
         
-        # Cargar credenciales guardadas (puede hacer llamadas de red)
-        self.load_saved_credentials()
+        # Paso 2: Cargar imagen de fondo (puede ser lenta)
+        QTimer.singleShot(50, lambda: self._load_background_step())
+    
+    def _load_background_step(self):
+        """Paso 2: Cargar imagen de fondo"""
+        try:
+            if self._bg_label:
+                self._load_background_image("default")
+        except Exception as e:
+            print(f"[ERROR] Error cargando imagen de fondo: {e}")
         
-        # Cargar versiones después de mostrar la ventana
-        self.load_versions_async()
+        # Paso 3: Cargar credenciales (puede hacer llamadas de red)
+        QTimer.singleShot(50, lambda: self._load_credentials_step())
+    
+    def _load_credentials_step(self):
+        """Paso 3: Cargar credenciales"""
+        try:
+            self.load_saved_credentials()
+        except Exception as e:
+            print(f"[ERROR] Error cargando credenciales: {e}")
+        
+        # Paso 4: Cargar versiones (operación más pesada)
+        QTimer.singleShot(50, lambda: self._load_versions_step())
+    
+    def _load_versions_step(self):
+        """Paso 4: Cargar versiones"""
+        try:
+            self.load_versions_async()
+        except Exception as e:
+            print(f"[ERROR] Error cargando versiones: {e}")
     
     def init_ui(self):
         """Inicializa la interfaz de usuario"""
@@ -2781,7 +3036,7 @@ class LauncherWindow(QMainWindow):
             central_widget.resizeEvent = resize_with_bg
             
             # Establecer tamaño inicial después de que el widget esté completamente inicializado
-            QApplication.processEvents()
+            # NO procesar eventos aquí para no bloquear la inicialización
             update_bg_label_size()
         
         # Método para cargar imagen de fondo (debe definirse después de crear _bg_label)
@@ -2912,6 +3167,44 @@ class LauncherWindow(QMainWindow):
                 border: 2px solid #6d28d9;
                 border-radius: 5px;
                 padding: 5px;
+            }
+            QTextEdit QScrollBar:vertical {
+                background: #1a0d2e;
+                width: 12px;
+                border-radius: 6px;
+                border: 1px solid #6d28d9;
+            }
+            QTextEdit QScrollBar::handle:vertical {
+                background: #6d28d9;
+                border-radius: 6px;
+                min-height: 20px;
+                border: 1px solid #8b5cf6;
+            }
+            QTextEdit QScrollBar::handle:vertical:hover {
+                background: #8b5cf6;
+            }
+            QTextEdit QScrollBar::add-line:vertical, QTextEdit QScrollBar::sub-line:vertical {
+                background: #1a0d2e;
+                height: 0px;
+            }
+            QTextEdit QScrollBar:horizontal {
+                background: #1a0d2e;
+                height: 12px;
+                border-radius: 6px;
+                border: 1px solid #6d28d9;
+            }
+            QTextEdit QScrollBar::handle:horizontal {
+                background: #6d28d9;
+                border-radius: 6px;
+                min-width: 20px;
+                border: 1px solid #8b5cf6;
+            }
+            QTextEdit QScrollBar::handle:horizontal:hover {
+                background: #8b5cf6;
+            }
+            QTextEdit QScrollBar::add-line:horizontal, QTextEdit QScrollBar::sub-line:horizontal {
+                background: #1a0d2e;
+                width: 0px;
             }
             QProgressBar {
                 background: #0f0a1a;
@@ -3361,16 +3654,24 @@ class LauncherWindow(QMainWindow):
         # Primero agregar perfiles custom (sin jerarquía, al principio)
         custom_profiles = self._get_custom_profiles()
         profile_count = 0
+        version_to_index = {}  # Inicializar el diccionario de índice
+        
         for profile in custom_profiles:
             display_name = f"Perfil {profile['name']}"
             # Usar un formato especial para identificar perfiles custom: "profile:{profile_id}"
             profile_id = f"profile:{profile['id']}"
             self.version_combo.addItem(display_name, profile_id)
+            # Agregar el perfil custom al índice
+            version_to_index[profile_id] = profile_count
             profile_count += 1
         
         if versions:
             # Organizar versiones en árbol
-            organized_versions, version_to_index = self._organize_versions_tree(versions)
+            organized_versions, version_to_index_normal = self._organize_versions_tree(versions)
+            
+            # Actualizar los índices de las versiones normales sumando el offset de los perfiles custom
+            for version_id, index in version_to_index_normal.items():
+                version_to_index[version_id] = index + profile_count
             
             # Agregar versiones organizadas al combo (después de los perfiles custom)
             for display_name, version_id in organized_versions:
@@ -4225,6 +4526,550 @@ class LauncherWindow(QMainWindow):
                 self.update_user_widget(None)
                 self.launch_button.setEnabled(False)
     
+    def _check_and_update_profile(self, profile_dir, profile_id):
+        """
+        Verifica y actualiza el perfil desde el servidor antes de lanzar
+        
+        Args:
+            profile_dir: Directorio del perfil
+            profile_id: ID del perfil
+        """
+        try:
+            # Leer configuración del perfil
+            profile_config_path = os.path.join(profile_dir, "profile_config.json")
+            profile_config = None
+            
+            if os.path.exists(profile_config_path):
+                with open(profile_config_path, 'r', encoding='utf-8') as f:
+                    profile_config = json.load(f)
+            else:
+                print(f"[INFO] No se encontró profile_config.json, intentando leer desde servidor...")
+                # Intentar leer el JSON del servidor desde un archivo guardado o desde la red
+                # Primero, intentar leer desde un archivo profiles.json guardado en el perfil
+                saved_profiles_path = os.path.join(profile_dir, "profiles.json")
+                if os.path.exists(saved_profiles_path):
+                    try:
+                        with open(saved_profiles_path, 'r', encoding='utf-8') as f:
+                            profiles_data = json.load(f)
+                        # Buscar el perfil correspondiente
+                        profiles = profiles_data.get("profiles", [])
+                        for profile in profiles:
+                            if profile.get("id") == profile_id:
+                                # Crear un profile_config mínimo desde el perfil encontrado
+                                server_url = profiles_data.get("server_url", "")
+                                hostname = server_url.replace("http://", "").replace("https://", "").split(":")[0] if server_url else ""
+                                profile_config = {
+                                    "hostname": hostname,
+                                    "server_url": server_url,
+                                    "profile_id": profile_id,
+                                    "profile_name": profile.get("name", "Servidor"),
+                                    "installed_at": 0,
+                                    "config": profile.get("config", {})
+                                }
+                                print(f"[DEBUG] profile_config reconstruido desde profiles.json guardado")
+                                break
+                    except Exception as e:
+                        print(f"[WARN] Error leyendo profiles.json guardado: {e}")
+                
+                # Si aún no tenemos profile_config, intentar obtenerlo desde los servidores guardados
+                if not profile_config:
+                    print(f"[WARN] No se pudo reconstruir profile_config, intentando obtener desde servidores guardados...")
+                    # Intentar leer los servidores guardados en launcher_config.json
+                    try:
+                        from config import CONFIG_FILE
+                        if CONFIG_FILE.exists():
+                            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                                config_data = json.load(f)
+                            servers = config_data.get('servers', [])
+                            print(f"[DEBUG] Encontrados {len(servers)} servidor(es) guardado(s)")
+                            
+                            # Intentar obtener el JSON de cada servidor hasta encontrar el perfil
+                            for server_info in servers:
+                                hostname = server_info.get('hostname')
+                                api_key = server_info.get('api_key')
+                                print(f"[DEBUG] Intentando obtener JSON desde servidor: {hostname}")
+                                
+                                profiles_data, error = fetch_profiles_json(hostname, api_key)
+                                if error or not profiles_data:
+                                    print(f"[DEBUG] No se pudo obtener JSON desde {hostname}: {error}")
+                                    continue
+                                
+                                # Buscar el perfil correspondiente
+                                profiles = profiles_data.get("profiles", [])
+                                for profile in profiles:
+                                    if profile.get("id") == profile_id:
+                                        print(f"[DEBUG] Perfil encontrado en servidor {hostname}")
+                                        # Crear un profile_config mínimo desde el perfil encontrado
+                                        server_url = profiles_data.get("server_url", f"http://{hostname}:25080")
+                                        profile_config = {
+                                            "hostname": hostname,
+                                            "server_url": server_url,
+                                            "profile_id": profile_id,
+                                            "profile_name": profile.get("name", "Servidor"),
+                                            "installed_at": 0,
+                                            "config": profile.get("config", {})
+                                        }
+                                        print(f"[DEBUG] profile_config reconstruido desde servidor guardado")
+                                        break
+                                
+                                if profile_config:
+                                    break
+                    except Exception as e:
+                        print(f"[WARN] Error intentando obtener profile_config desde servidores guardados: {e}")
+                        import traceback
+                        traceback.print_exc()
+                    
+                    # Si aún no tenemos profile_config, no podemos continuar
+                    if not profile_config:
+                        print(f"[WARN] No se pudo obtener profile_config desde ningún servidor guardado")
+                        return
+            
+            if not profile_config:
+                print(f"[WARN] No se pudo obtener profile_config, saltando verificación")
+                return
+            
+            hostname = profile_config.get("hostname")
+            
+            # SIEMPRE intentar agregar servidor desde profile_config si hay información
+            config = profile_config.get("config", {})
+            print(f"[DEBUG] profile_config leído:")
+            print(f"[DEBUG]   hostname: {hostname}")
+            print(f"[DEBUG]   config: {config}")
+            print(f"[DEBUG]   server_ip en config: {config.get('server_ip')}")
+            
+            if config.get("server_ip"):
+                print(f"[DEBUG] Intentando agregar servidor desde profile_config...")
+                minimal_profile = {
+                    "id": profile_id,
+                    "name": profile_config.get("profile_name", "Servidor"),
+                    "config": config
+                }
+                print(f"[DEBUG] Llamando a _ensure_server_in_list con perfil mínimo...")
+                self._ensure_server_in_list(profile_dir, minimal_profile)
+            else:
+                print(f"[DEBUG] No hay server_ip en config, no se puede agregar servidor")
+            
+            if not hostname:
+                print(f"[INFO] No hay hostname en la configuración, saltando verificación de actualizaciones")
+                return
+            
+            print(f"[INFO] Verificando actualizaciones del perfil desde {hostname}...")
+            self.add_message("Verificando actualizaciones del perfil...")
+            
+            # Obtener JSON del servidor
+            profiles_data, error = fetch_profiles_json(hostname)
+            if error or not profiles_data:
+                print(f"[WARN] No se pudo obtener JSON del servidor: {error}")
+                # Intentar agregar servidor desde profile_config.json aunque no se pueda obtener el JSON
+                config = profile_config.get("config", {})
+                if config.get("server_ip"):
+                    minimal_profile = {
+                        "id": profile_id,
+                        "name": profile_config.get("profile_name", "Servidor"),
+                        "config": config
+                    }
+                    self._ensure_server_in_list(profile_dir, minimal_profile)
+                return
+            
+            # Buscar el perfil correspondiente
+            profiles = profiles_data.get("profiles", [])
+            server_profile = None
+            for profile in profiles:
+                if profile.get("id") == profile_id:
+                    server_profile = profile
+                    break
+            
+            if not server_profile:
+                print(f"[WARN] Perfil {profile_id} no encontrado en el servidor")
+                # Intentar agregar servidor desde profile_config.json aunque no se encuentre el perfil
+                config = profile_config.get("config", {})
+                if config.get("server_ip"):
+                    minimal_profile = {
+                        "id": profile_id,
+                        "name": profile_config.get("profile_name", "Servidor"),
+                        "config": config
+                    }
+                    self._ensure_server_in_list(profile_dir, minimal_profile)
+                return
+            
+            # Comparar y actualizar mods
+            server_mods = server_profile.get("mods", [])
+            if server_mods:
+                mods_dir = os.path.join(profile_dir, "mods")
+                os.makedirs(mods_dir, exist_ok=True)
+                
+                # Obtener lista de mods instalados
+                installed_mods = set()
+                if os.path.exists(mods_dir):
+                    for file in os.listdir(mods_dir):
+                        if file.endswith(('.jar', '.zip')):
+                            installed_mods.add(file)
+                
+                # Obtener lista de mods del servidor
+                server_mod_names = {mod.get("name") for mod in server_mods}
+                
+                # Descargar mods faltantes o actualizados
+                base_url = profiles_data.get("server_url", f"http://{hostname}:25080")
+                if not base_url.startswith("http"):
+                    base_url = f"http://{base_url}"
+                
+                for mod in server_mods:
+                    mod_name = mod.get("name")
+                    mod_url = mod.get("url", "")
+                    
+                    if not mod_url.startswith("http"):
+                        if not mod_url.startswith("/"):
+                            mod_url = f"/{mod_url}"
+                        mod_url = f"{base_url}{mod_url}"
+                    
+                    mod_path = os.path.join(mods_dir, mod_name)
+                    
+                    # Si el mod no existe o el servidor tiene una versión más nueva, descargarlo
+                    if mod_name not in installed_mods:
+                        print(f"[INFO] Descargando mod nuevo: {mod_name}")
+                        try:
+                            response = requests.get(mod_url, stream=True, timeout=60)
+                            response.raise_for_status()
+                            with open(mod_path, 'wb') as f:
+                                for chunk in response.iter_content(chunk_size=8192):
+                                    if chunk:
+                                        f.write(chunk)
+                            print(f"[INFO] Mod descargado: {mod_name}")
+                        except Exception as e:
+                            print(f"[WARN] Error descargando mod {mod_name}: {e}")
+                    # TODO: Podríamos verificar hash o fecha de modificación para actualizar mods existentes
+            
+            # Comparar y actualizar shaders
+            server_shaders = server_profile.get("shaders", [])
+            if server_shaders:
+                shaders_dir = os.path.join(profile_dir, "shaderpacks")
+                os.makedirs(shaders_dir, exist_ok=True)
+                
+                installed_shaders = set()
+                if os.path.exists(shaders_dir):
+                    for file in os.listdir(shaders_dir):
+                        if file.endswith(('.zip', '.jar')):
+                            installed_shaders.add(file)
+                
+                base_url = profiles_data.get("server_url", f"http://{hostname}:25080")
+                if not base_url.startswith("http"):
+                    base_url = f"http://{base_url}"
+                
+                for shader in server_shaders:
+                    shader_name = shader.get("name")
+                    shader_url = shader.get("url", "")
+                    
+                    if not shader_url.startswith("http"):
+                        if not shader_url.startswith("/"):
+                            shader_url = f"/{shader_url}"
+                        shader_url = f"{base_url}{shader_url}"
+                    
+                    shader_path = os.path.join(shaders_dir, shader_name)
+                    
+                    if shader_name not in installed_shaders:
+                        print(f"[INFO] Descargando shader nuevo: {shader_name}")
+                        try:
+                            response = requests.get(shader_url, stream=True, timeout=60)
+                            response.raise_for_status()
+                            with open(shader_path, 'wb') as f:
+                                for chunk in response.iter_content(chunk_size=8192):
+                                    if chunk:
+                                        f.write(chunk)
+                            print(f"[INFO] Shader descargado: {shader_name}")
+                        except Exception as e:
+                            print(f"[WARN] Error descargando shader {shader_name}: {e}")
+            
+            # Comparar y actualizar resource packs
+            server_rps = server_profile.get("resourcepacks", [])
+            if server_rps:
+                rp_dir = os.path.join(profile_dir, "resourcepacks")
+                os.makedirs(rp_dir, exist_ok=True)
+                
+                installed_rps = set()
+                if os.path.exists(rp_dir):
+                    for file in os.listdir(rp_dir):
+                        if file.endswith(('.zip', '.jar')):
+                            installed_rps.add(file)
+                
+                base_url = profiles_data.get("server_url", f"http://{hostname}:25080")
+                if not base_url.startswith("http"):
+                    base_url = f"http://{base_url}"
+                
+                for rp in server_rps:
+                    rp_name = rp.get("name")
+                    rp_url = rp.get("url", "")
+                    
+                    if not rp_url.startswith("http"):
+                        if not rp_url.startswith("/"):
+                            rp_url = f"/{rp_url}"
+                        rp_url = f"{base_url}{rp_url}"
+                    
+                    rp_path = os.path.join(rp_dir, rp_name)
+                    
+                    if rp_name not in installed_rps:
+                        print(f"[INFO] Descargando resource pack nuevo: {rp_name}")
+                        try:
+                            response = requests.get(rp_url, stream=True, timeout=60)
+                            response.raise_for_status()
+                            with open(rp_path, 'wb') as f:
+                                for chunk in response.iter_content(chunk_size=8192):
+                                    if chunk:
+                                        f.write(chunk)
+                            print(f"[INFO] Resource pack descargado: {rp_name}")
+                        except Exception as e:
+                            print(f"[WARN] Error descargando resource pack {rp_name}: {e}")
+            
+            # Actualizar options.txt si las opciones han cambiado
+            server_options = server_profile.get("options", {})
+            if server_options:
+                options_path = os.path.join(profile_dir, "options.txt")
+                options_dict = {}
+                
+                if os.path.exists(options_path):
+                    with open(options_path, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            line = line.strip()
+                            if ':' in line:
+                                key, value = line.split(':', 1)
+                                options_dict[key.strip()] = value.strip()
+                
+                # Actualizar opciones del servidor
+                updated = False
+                if "fov" in server_options and str(options_dict.get("fov", "")) != str(server_options["fov"]):
+                    options_dict["fov"] = str(server_options["fov"])
+                    updated = True
+                if "renderDistance" in server_options and str(options_dict.get("renderDistance", "")) != str(server_options["renderDistance"]):
+                    options_dict["renderDistance"] = str(server_options["renderDistance"])
+                    updated = True
+                if "maxFps" in server_options and str(options_dict.get("maxFps", "")) != str(server_options["maxFps"]):
+                    options_dict["maxFps"] = str(server_options["maxFps"])
+                    updated = True
+                if "guiScale" in server_options and str(options_dict.get("guiScale", "")) != str(server_options["guiScale"]):
+                    options_dict["guiScale"] = str(server_options["guiScale"])
+                    updated = True
+                
+                # Actualizar shaders
+                if server_options.get("enable_shaders", False):
+                    shader_pack = server_options.get("shader_pack", "")
+                    if shader_pack:
+                        shader_pack = shader_pack.replace(".zip", "").replace(".jar", "")
+                        if options_dict.get("shaderPack") != shader_pack:
+                            options_dict["shaderPack"] = shader_pack
+                            updated = True
+                else:
+                    if options_dict.get("shaderPack") != "OFF":
+                        options_dict["shaderPack"] = "OFF"
+                        updated = True
+                
+                # Actualizar resource packs
+                if server_options.get("enable_resourcepacks", False):
+                    resource_packs = server_options.get("resource_packs", [])
+                    if resource_packs:
+                        packs_str = "[" + ",".join([f'"{p.replace(".zip", "").replace(".jar", "")}.zip"' for p in resource_packs]) + "]"
+                        if options_dict.get("resourcePacks") != packs_str:
+                            options_dict["resourcePacks"] = packs_str
+                            updated = True
+                else:
+                    if options_dict.get("resourcePacks") != "[]":
+                        options_dict["resourcePacks"] = "[]"
+                        updated = True
+                
+                if updated:
+                    with open(options_path, 'w', encoding='utf-8') as f:
+                        for key, value in options_dict.items():
+                            f.write(f"{key}:{value}\n")
+                    print(f"[INFO] options.txt actualizado")
+            
+            print(f"[INFO] Verificación del perfil completada")
+            self.add_message("Perfil actualizado")
+            
+            # Asegurar que el servidor esté en la lista de Multiplayer
+            if server_profile:
+                self._ensure_server_in_list(profile_dir, server_profile)
+            
+        except Exception as e:
+            print(f"[WARN] Error verificando perfil: {e}")
+            import traceback
+            traceback.print_exc()
+            # No bloquear el lanzamiento si hay error en la verificación
+        
+        # Si no se pudo obtener el perfil del servidor, intentar agregar el servidor desde profile_config.json
+        # (Esto es un fallback adicional por si acaso)
+        try:
+            profile_config_path = os.path.join(profile_dir, "profile_config.json")
+            print(f"[DEBUG] Fallback: Verificando profile_config.json en: {profile_config_path}")
+            if os.path.exists(profile_config_path):
+                print(f"[DEBUG] profile_config.json existe, leyendo...")
+                with open(profile_config_path, 'r', encoding='utf-8') as f:
+                    profile_config = json.load(f)
+                
+                # Intentar obtener el perfil desde el JSON guardado o construir uno mínimo
+                config = profile_config.get("config", {})
+                print(f"[DEBUG] Fallback: config obtenido: {config}")
+                if config.get("server_ip"):
+                    print(f"[DEBUG] Fallback: server_ip encontrado, creando perfil mínimo...")
+                    # Crear un perfil mínimo para agregar el servidor
+                    minimal_profile = {
+                        "id": profile_id,
+                        "name": profile_config.get("profile_name", "Servidor"),
+                        "config": config
+                    }
+                    print(f"[DEBUG] Fallback: Llamando a _ensure_server_in_list...")
+                    self._ensure_server_in_list(profile_dir, minimal_profile)
+                else:
+                    print(f"[DEBUG] Fallback: No hay server_ip en config")
+            else:
+                print(f"[DEBUG] Fallback: profile_config.json no existe")
+        except Exception as e:
+            print(f"[ERROR] Error intentando agregar servidor desde config: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _ensure_server_in_list(self, profile_dir, profile):
+        """
+        Asegura que el servidor esté en la lista de Multiplayer del perfil
+        
+        Args:
+            profile_dir: Directorio del perfil
+            profile: Diccionario con la información del perfil (debe tener 'config' y 'name')
+        """
+        config = profile.get("config", {})
+        server_ip = config.get("server_ip")
+        server_port = config.get("server_port", 25565)
+        auto_connect = config.get("auto_connect", False)
+        server_name = profile.get("name", "Servidor")
+        
+        print(f"[DEBUG] _ensure_server_in_list() llamado")
+        print(f"[DEBUG]   profile_dir: {profile_dir}")
+        print(f"[DEBUG]   server_name: {server_name}")
+        print(f"[DEBUG]   server_ip: {server_ip}")
+        print(f"[DEBUG]   server_port: {server_port}")
+        print(f"[DEBUG]   auto_connect: {auto_connect}")
+        
+        if not server_ip:
+            print(f"[DEBUG] No hay server_ip configurado, saltando agregar servidor")
+            return
+        
+        if nbtlib is None:
+            print(f"[ERROR] nbtlib no está instalado. No se puede agregar servidor a la lista.")
+            print(f"[ERROR] Instala con: pip install nbtlib")
+            print(f"[ERROR] O ejecuta el launcher con el Python del entorno virtual:")
+            print(f"[ERROR]   .venv\\Scripts\\python.exe launcher.py")
+            return
+        
+        try:
+            from nbtlib import File, String, Byte, List, Compound
+            
+            servers_dat_path = os.path.join(profile_dir, "servers.dat")
+            print(f"[DEBUG] Ruta de servers.dat: {servers_dat_path}")
+            
+            # Leer servers.dat existente o crear uno nuevo
+            if os.path.exists(servers_dat_path):
+                print(f"[DEBUG] servers.dat existe, leyendo...")
+                try:
+                    nbt_file = File.load(servers_dat_path, gzipped=False)
+                    servers_list = nbt_file.get("servers", List[Compound]([]))
+                    print(f"[DEBUG] Servidores existentes en servers.dat: {len(servers_list)}")
+                    for idx, srv in enumerate(servers_list):
+                        if isinstance(srv, Compound):
+                            print(f"[DEBUG]   [{idx}] {srv.get('name', 'Sin nombre')} - {srv.get('ip', 'Sin IP')}")
+                except Exception as e:
+                    print(f"[WARN] Error leyendo servers.dat, creando uno nuevo: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    nbt_file = File()
+                    servers_list = List[Compound]([])
+            else:
+                print(f"[DEBUG] servers.dat no existe, creando uno nuevo")
+                nbt_file = File()
+                servers_list = List[Compound]([])
+            
+            # Verificar si el servidor ya existe
+            server_address = f"{server_ip}:{server_port}" if server_port != 25565 else server_ip
+            
+            print(f"[DEBUG] Buscando servidor: nombre='{server_name}', dirección='{server_address}'")
+            
+            # Buscar si ya existe
+            server_exists = False
+            for server in servers_list:
+                if isinstance(server, Compound):
+                    existing_ip = server.get("ip", "")
+                    existing_name = server.get("name", "")
+                    print(f"[DEBUG]   Comparando con servidor existente: '{existing_name}' - '{existing_ip}'")
+                    if existing_ip == server_address or existing_ip == server_ip:
+                        server_exists = True
+                        print(f"[DEBUG]   Servidor ya existe en la lista")
+                        # Actualizar nombre si es diferente
+                        if server.get("name") != server_name:
+                            server["name"] = String(server_name)
+                            print(f"[DEBUG]   Nombre actualizado: {server_name}")
+                        break
+            
+            # Agregar servidor si no existe
+            if not server_exists:
+                print(f"[DEBUG] Agregando nuevo servidor a la lista...")
+                new_server = Compound({
+                    "name": String(server_name),
+                    "ip": String(server_address),
+                    "icon": String(""),  # Sin icono por defecto
+                    "acceptTextures": Byte(1)  # Aceptar resource packs del servidor
+                })
+                servers_list.append(new_server)
+                print(f"[INFO] Servidor agregado a la lista: {server_name} ({server_address})")
+                self.add_message(f"Servidor agregado a Multiplayer: {server_name}")
+            else:
+                print(f"[DEBUG] Servidor ya existe, no se agregó duplicado")
+            
+            # Guardar servers.dat
+            print(f"[DEBUG] Guardando servers.dat con {len(servers_list)} servidor(es)...")
+            nbt_file["servers"] = servers_list
+            nbt_file.save(servers_dat_path)
+            print(f"[DEBUG] servers.dat guardado exitosamente en: {servers_dat_path}")
+            
+            # Verificar que se guardó correctamente
+            if os.path.exists(servers_dat_path):
+                file_size = os.path.getsize(servers_dat_path)
+                print(f"[DEBUG] Verificación: servers.dat existe, tamaño: {file_size} bytes")
+            else:
+                print(f"[ERROR] servers.dat no se creó después de guardar!")
+            
+            # Si auto_connect está habilitado, guardar en options.txt
+            if auto_connect:
+                print(f"[DEBUG] auto_connect habilitado, guardando en options.txt...")
+                options_path = os.path.join(profile_dir, "options.txt")
+                options_dict = {}
+                if os.path.exists(options_path):
+                    with open(options_path, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            line = line.strip()
+                            if ':' in line:
+                                key, value = line.split(':', 1)
+                                options_dict[key.strip()] = value.strip()
+                
+                # Guardar último servidor conectado (Minecraft lo usa para auto-conectar)
+                options_dict["lastServer"] = server_address
+                print(f"[DEBUG] lastServer configurado en options.txt: {server_address}")
+                
+                with open(options_path, 'w', encoding='utf-8') as f:
+                    for key, value in options_dict.items():
+                        f.write(f"{key}:{value}\n")
+            else:
+                print(f"[DEBUG] auto_connect deshabilitado, no se configuró lastServer")
+                
+        except ImportError as e:
+            print(f"[ERROR] nbtlib no está instalado. No se puede agregar servidor a la lista.")
+            print(f"[ERROR] Error de importación: {e}")
+            print(f"[ERROR] Instala con: pip install nbtlib")
+            self.add_message("Error: nbtlib no está instalado. Instala con: pip install nbtlib")
+            import traceback
+            traceback.print_exc()
+        except Exception as e:
+            print(f"[ERROR] Error agregando servidor a la lista: {e}")
+            print(f"[ERROR] Tipo de error: {type(e).__name__}")
+            self.add_message(f"Error agregando servidor: {e}")
+            import traceback
+            traceback.print_exc()
+    
     def launch_minecraft(self):
         """Lanza Minecraft con las credenciales guardadas"""
         credentials = self.credential_storage.load_credentials()
@@ -4296,6 +5141,11 @@ class LauncherWindow(QMainWindow):
             profile_id = selected_version.replace("profile:", "")
             game_dir = os.path.join(self.minecraft_launcher.minecraft_path, "profiles", profile_id)
             print(f"[DEBUG] Perfil custom detectado: {profile_id}, game_dir: {game_dir}")
+            self.add_message(f"Perfil custom detectado: {profile_id}")
+            
+            # Verificar y actualizar el perfil desde el servidor
+            self.add_message("Verificando actualizaciones del perfil...")
+            self._check_and_update_profile(game_dir, profile_id)
             # Leer launcher_profiles.json para obtener lastVersionId
             launcher_profiles_path = os.path.join(game_dir, "launcher_profiles.json")
             if os.path.exists(launcher_profiles_path):
@@ -4339,6 +5189,9 @@ class LauncherWindow(QMainWindow):
                 print(f"[WARN] No se encontró launcher_profiles.json en: {launcher_profiles_path}")
         
         print(f"[DEBUG] Versión final a usar: {actual_version}, game_dir: {game_dir}")
+        self.add_message(f"Versión seleccionada: {actual_version}")
+        if game_dir:
+            self.add_message(f"Directorio del perfil: {game_dir}")
         
         # Si es un perfil custom, verificar que todas las librerías estén descargadas
         if game_dir:
@@ -4350,13 +5203,18 @@ class LauncherWindow(QMainWindow):
                     f"El perfil no tiene todas las librerías necesarias descargadas.\n\n"
                     f"Por favor, reinstala el perfil o verifica que la instalación se completó correctamente."
                 )
+                self.add_message("Error: Librerías incompletas, no se puede lanzar")
                 return
+            self.add_message("✓ Todas las librerías están descargadas")
         
         # Verificar requisitos de Java
+        self.add_message("Verificando requisitos de Java...")
         version_json = self.minecraft_launcher._load_version_json(actual_version, game_dir=game_dir)
         required_java = None
         if version_json:
             required_java = self.minecraft_launcher.get_required_java_version(version_json)
+            if required_java:
+                self.add_message(f"Java requerida: versión {required_java}")
         
         # Obtener la versión de Java seleccionada
         selected_java_path = None
@@ -4412,14 +5270,18 @@ class LauncherWindow(QMainWindow):
                             self.add_message(f"Lanzando Minecraft version: {actual_version}")
                             self.add_message(f"Usando Java: {java_path}")
                             self.launch_button.setEnabled(False)
-                            success_launch, _ = self.minecraft_launcher.launch_minecraft(credentials, actual_version, java_path, game_dir=game_dir)
-                            if success_launch:
-                                self.add_message("Minecraft proceso iniciado correctamente")
-                                self.add_message("El juego deberia abrirse en breve...")
-                                self.launch_button.setEnabled(True)
-                            else:
-                                self.add_message("Error al lanzar Minecraft")
-                                self.launch_button.setEnabled(True)
+                            
+                            # Lanzar en un thread para no bloquear la UI
+                            self.launch_minecraft_thread = LaunchMinecraftThread(
+                                self.minecraft_launcher,
+                                credentials,
+                                actual_version,
+                                java_path,
+                                game_dir
+                            )
+                            self.launch_minecraft_thread.message.connect(self.add_message)
+                            self.launch_minecraft_thread.finished.connect(self.on_minecraft_launched)
+                            self.launch_minecraft_thread.start()
                         else:
                             self.add_message("Descarga de Java cancelada o falló")
                             self.launch_button.setEnabled(True)
@@ -4438,111 +5300,40 @@ class LauncherWindow(QMainWindow):
             elif suitable_java:
                 selected_java_path = suitable_java
         
-        self.add_message(f"Lanzando Minecraft version: {actual_version}")
+        self.add_message("=" * 50)
+        self.add_message(f"Lanzando Minecraft versión: {actual_version}")
         if selected_java_path:
             self.add_message(f"Usando Java: {selected_java_path}")
         if game_dir:
             self.add_message(f"Usando perfil custom: {game_dir}")
+        self.add_message("Preparando lanzamiento...")
         self.launch_button.setEnabled(False)
         
-        success, detected_java_version = self.minecraft_launcher.launch_minecraft(credentials, actual_version, selected_java_path, game_dir=game_dir)
-        
+        # Lanzar en un thread para no bloquear la UI
+        self.launch_minecraft_thread = LaunchMinecraftThread(
+            self.minecraft_launcher,
+            credentials,
+            actual_version,
+            selected_java_path,
+            game_dir
+        )
+        self.launch_minecraft_thread.message.connect(self.add_message)
+        self.launch_minecraft_thread.finished.connect(self.on_minecraft_launched)
+        self.launch_minecraft_thread.start()
+    
+    def on_minecraft_launched(self, success, detected_java_version):
+        """Callback cuando el thread de lanzamiento termina"""
         if success:
-            self.add_message("Minecraft proceso iniciado correctamente")
-            self.add_message("El juego deberia abrirse en breve...")
-            # Habilitar el botón de nuevo cuando el proceso se inicia correctamente
-            self.launch_button.setEnabled(True)
-            # NO cerrar el launcher inmediatamente - dejar que el usuario vea si hay errores
-            # El launcher se puede cerrar manualmente
-        else:
-            self.add_message("Error al lanzar Minecraft")
-            self.launch_button.setEnabled(True)
-            
-            # Obtener mensaje de error más específico y ofrecer descargar Java si es necesario
-            version_json = self.minecraft_launcher._load_version_json(actual_version, game_dir=game_dir)
-            required_java = None
-            if version_json:
-                required_java = self.minecraft_launcher.get_required_java_version(version_json)
-            
-            # Si se detectó la versión de Java desde el error, usar esa
+            self.add_message("✓ Proceso de Minecraft iniciado correctamente")
+            self.add_message("El juego debería abrirse en breve...")
             if detected_java_version:
-                required_java = detected_java_version
-            
-            if required_java:
-                java_installations = self.minecraft_launcher.find_java_installations()
-                suitable_java = None
-                
-                # Verificar si hay Java adecuada
-                if required_java == 8:
-                    if 8 in java_installations:
-                        suitable_java = java_installations[8]
-                else:
-                    if required_java in java_installations:
-                        suitable_java = java_installations[required_java]
-                    else:
-                        # Buscar versión mayor o igual
-                        suitable_versions = {v: p for v, p in java_installations.items() if v >= required_java}
-                        if suitable_versions:
-                            suitable_java = suitable_versions[min(suitable_versions.keys())]
-                
-                # Si no hay Java adecuada, ofrecer descargar
-                if not suitable_java:
-                    if required_java == 8:
-                        QMessageBox.critical(
-                            self, 
-                            "Java 8 Requerida", 
-                            f"Esta version de Minecraft requiere Java 8 exactamente.\n\n"
-                            f"Java 9 o superior NO es compatible con versiones antiguas.\n\n"
-                            f"Versiones de Java disponibles: {sorted(java_installations.keys())}\n\n"
-                            f"Por favor:\n"
-                            f"1. Instala Java 8, o\n"
-                            f"2. Usa una version mas reciente de Minecraft (1.13+)"
-                        )
-                    else:
-                        reply = QMessageBox.question(
-                            self,
-                            "Java Requerida",
-                            f"Esta version de Minecraft requiere Java {required_java}.\n\n"
-                            f"Versiones de Java disponibles: {sorted(java_installations.keys()) if java_installations else 'Ninguna'}\n\n"
-                            f"¿Deseas descargar Java {required_java} automaticamente?",
-                            QMessageBox.Yes | QMessageBox.No
-                        )
-                        
-                        if reply == QMessageBox.Yes:
-                            self.add_message(f"Descargando Java {required_java}...")
-                            
-                            def on_java_downloaded_retry(success, java_path):
-                                if success and java_path:
-                                    self.add_message(f"Java {required_java} descargada correctamente")
-                                    # Recargar versiones de Java
-                                    self.load_java_versions()
-                                    # Intentar lanzar de nuevo con la Java descargada
-                                    self.add_message(f"Reintentando lanzar con Java {required_java}...")
-                                    self.launch_button.setEnabled(False)
-                                    success_launch, _ = self.minecraft_launcher.launch_minecraft(credentials, actual_version, java_path, game_dir=game_dir)
-                                    if success_launch:
-                                        self.add_message("Minecraft proceso iniciado correctamente")
-                                        self.add_message("El juego deberia abrirse en breve...")
-                                        self.launch_button.setEnabled(True)
-                                    else:
-                                        self.add_message("Error al lanzar Minecraft despues de descargar Java")
-                                        self.launch_button.setEnabled(True)
-                                else:
-                                    self.add_message("Descarga de Java cancelada o falló")
-                                    self.launch_button.setEnabled(True)
-                            
-                            self.download_java_async(required_java, on_java_downloaded_retry)
-                            return  # Salir aquí, el callback continuará
-                        else:
-                            QMessageBox.warning(
-                                self,
-                                "Java Requerida",
-                                f"Esta version requiere Java {required_java}.\n"
-                                f"Por favor, instala Java {required_java} o selecciona una version diferente de Minecraft."
-                            )
-                    return
-            
-            QMessageBox.critical(self, "Error", "No se pudo lanzar Minecraft. Revisa los mensajes para mas detalles.")
+                self.add_message(f"Java detectada: versión {detected_java_version}")
+        else:
+            self.add_message("✗ Error al lanzar Minecraft")
+            self.add_message("Revisa los mensajes de error anteriores")
+        
+        # Habilitar el botón de nuevo
+        self.launch_button.setEnabled(True)
     
     def _on_user_widget_clicked(self):
         """Maneja el clic en el widget de usuario"""
@@ -4727,7 +5518,15 @@ class LauncherWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     window = LauncherWindow()
+    
+    # Mostrar la ventana inmediatamente, antes de cualquier carga pesada
     window.show()
+    window.raise_()
+    window.activateWindow()
+    
+    # Procesar eventos para asegurar que la ventana se dibuje
+    QApplication.processEvents()
+    
     sys.exit(app.exec_())
 
 if __name__ == "__main__":
